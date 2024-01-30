@@ -1,2 +1,2 @@
 # SDS
-Statistical Methods for Data Science Homeworks
+Statistical Methods for Data Science Homeworks (in R)
