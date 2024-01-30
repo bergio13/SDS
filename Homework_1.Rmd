@@ -1,0 +1,1116 @@
+---
+title: "SDS-HW-1"
+author: "Giorgio Bertone, Stefano Rinaldi, Marina Zanoni"
+date: "2023-11-24"
+output: 
+  prettydoc::html_pretty:
+    theme: simplex
+    highlight: pygments 
+    toc: yes
+    fig_caption: yes
+  pdf_document:
+    toc: yes
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plotly)
+library(rsconnect)
+library(ggplot2)
+library(magrittr)
+library(ggplot2)
+library(pracma)
+library(gridExtra)
+```
+
+```{=html}
+<style>
+body {
+text-align: justify}
+</style>
+```
+## Introduction
+
+In this R markdown, you will be able to find the solution for HW-1 of SDS 2023/2024.
+In the HTML format, you will be able to read our comments and visualize our plots.
+Yet, if you wish to investigate the code that generated them, or the code that was used "behind the scenes", you should refer the .Rmd file.
+The file includes also interactive plots.
+In the event that such plots are not visible in the HTML format, please refer to this link here.
+
+## Exercise 1
+
+### Setup
+
+There is a class of $n = 150$ students, where $k$ are liars and $n-k$ are honest.
+We are interested in classifying each person in one of these two groups (liar and honest).
+To do this we will let them toss a coin.
+Honest students toss a *fair* coin, i.e. a coin with probability $p$ of head equal to $0.5$.
+Liar students, instead, will toss a coin with probability $q$ of head, where $0.50 < q \leq 1$.
+So there will be $n-k$ Bernoulli random variables with probability of head equal to $p$ (we call them $H$) and $k$ Bernoulli random variables with probability of head equal to $q$ (let's call them $L$).
+
+Thus the number of students $n$ and the probability of head for honest students $p$ are fixed.
+
+```{r}
+n <- 150
+p <- 0.5
+```
+
+Our task is to choose a number $N$ of tosses so each student in the class will toss their coin $N$ times and then, based on the results of these tosses, decide if the student is honest or not (thus $q$ is known, but something we can't affect in any way, while we can choose $N$).
+For this end, we need to define a **decision rule**.
+Ideally, we would like this rule to minimize the classification errors.
+Indeed, we could claim that the student is a liar when he is actually honest (False Positive) or that the student is honest when he is actually a liar (False Negative).
+
+We start by trying to understand how the distribution of Heads within the two sub-populations of honest and liar students changes in relation to $q$ and $N$.
+For this purpose we fix $k$, the number of liars, and then sample from two Binomial distributions with $n-k$ and $k$ observations, $N$ trials, and $p$ and $q$ probability of success respectively.
+We can do this since the outcomes of the tosses are independent Bernoulli r.v.
+and the total number of heads is the sum of these outcomes.
+Indeed, it can be shown that $\sum_{i=1}^nBer(p) \sim Binom(n, p)$ (where $n$ and $p$ are generic and do not refer to any of the parameters stated above).
+
+We are now going to plot the two distributions when $q=0.6$, after fixing $k=75$.
+
+```{r,  fig.align = 'center', echo=FALSE, warning=FALSE}
+
+set.seed(123)
+n <- 150
+N <- 50
+p <- 0.5  # Probability of success for the binomial distribution
+q<-0.6
+k<-75
+combined <- data.frame(students = c(rbinom( n-k,N, prob = p) , rbinom( k,N,prob = q)),
+                       stud = rep(c("Honests", "Liars"), times = c(n-k,k)))
+
+lower.limit <- min(combined$students)
+upper.limit <- max(combined$students)
+honests.density <- density(subset(combined, stud == "Honests")$students,
+                           from = lower.limit, to = upper.limit, n = 2^10)
+liars.density <- density(subset(combined, stud == "Liars")$students,
+                         from = lower.limit, to = upper.limit, n = 2^10)
+
+density.difference <- honests.density$y - liars.density$y
+intersection.point <- honests.density$x[which(diff(density.difference > 0) != 0) + 1]
+
+ggplot(combined, aes(students, fill = stud)) +
+  geom_density(alpha = 0.2) +
+  theme_minimal() +
+  geom_vline(xintercept = intersection.point, color = "purple") +
+  labs(title = "Distributions of Honests and Liars (q=0.6)")+
+  labs(y=NULL)+
+  annotate("text", x = 29, y = 0.008, label = expression(alpha), size = 7, color = "black")+
+  annotate("text", x = 27, y = 0.008, label = expression(beta), size = 7, color = "black")+
+  theme(axis.text.y = element_blank())+
+  scale_fill_manual(values = c("Honests" = "cyan3", "Liars" = "yellow1"))+
+  geom_ribbon(data = data.frame(x = honests.density$x[honests.density$x > intersection.point], 
+                                y = honests.density$y[honests.density$x > intersection.point]),
+              aes(x = x, ymin = pmin(0, y), ymax = pmax(0, y)),
+              fill = "cyan3", alpha = 0.5, inherit.aes = FALSE)+
+  geom_ribbon(data = data.frame(x = liars.density$x[liars.density$x < intersection.point], 
+                                y = liars.density$y[liars.density$x < intersection.point]),
+              aes(ymin = pmin(0, y), x = x, ymax = pmax(0, y)),
+              fill = "yellow1", alpha = 0.5, inherit.aes = FALSE)
+
+```
+
+We notice that they overlap a lot and as a consequence its difficult to distinguish them.
+We can now imagine to have a classification threshold at $x=28$ (we are going to explain this better in the next lines).
+We can see that the probabilities of false positives and false negatives would be very high (the area in which they overlap after/before the threshold).
+
+Then we change $q$ and plot the two distributions again.
+
+```{r, echo=FALSE, fig.align='center'}
+set.seed(123)
+n <- 150
+N <- 50
+p <- 0.5  # Probability of success for the binomial distribution
+q1 <- 0.7  # First 'q' value
+q2 <- 0.8  # Second 'q' value
+k <- 75
+
+# Generating data for both 'q' values
+combined_q1 <- data.frame(
+  students = c(rbinom(n - k, N, prob = p), rbinom(k, N, prob = q1)),
+  stud = rep(c("Honests", "Liars"), times = c(n - k, k))
+)
+
+combined_q2 <- data.frame(
+  students = c(rbinom(n - k, N, prob = p), rbinom(k, N, prob = q2)),
+  stud = rep(c("Honests", "Liars"), times = c(n - k, k))
+)
+
+# Density plots for both 'q' values
+plot_q1 <- ggplot(combined_q1, aes(students, fill = stud)) +
+  geom_density(alpha = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Honests and Liars (q =", q1, ")")) +
+  labs(y = NULL)  +
+  theme(axis.text.y = element_blank()) +
+  scale_fill_manual(values = c("Honests" = "cyan3", "Liars" = "purple"))
+
+plot_q2 <- ggplot(combined_q2, aes(students, fill = stud)) +
+  geom_density(alpha = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Honsts and Liars (q =", q2, ")")) +
+  labs(y = NULL) +
+  theme(axis.text.y = element_blank()) +
+  scale_fill_manual(values = c("Honests" = "cyan3", "Liars" = "green"))
+
+# Arrange plots side by side
+grid.arrange(plot_q1, plot_q2, ncol = 2)
+
+```
+
+We also want to see how the two distributions change as we increase the number of tosses (with a fixed $q$).
+We choose $N_1=25$ and $N_2 = 75$ and plot the distributions.
+
+```{r, echo=FALSE, fig.align='center'}
+set.seed(123)
+n <- 150
+N1 <- 25  # First 'N' value
+N2 <- 75  # Second 'N' value
+p <- 0.5
+q <- 0.7
+k <- 75
+
+# Generating data for different 'N' values
+combined_N1 <- data.frame(
+  students = c(rbinom(n - k, N1, prob = p), rbinom(k, N1, prob = q)),
+  stud = rep(c("Honests", "Liars"), times = c(n - k, k))
+)
+
+combined_N2 <- data.frame(
+  students = c(rbinom(n - k, N2, prob = p), rbinom(k, N2, prob = q)),
+  stud = rep(c("Honests", "Liars"), times = c(n - k, k))
+)
+
+# Density plots for different 'N' values
+plot_N1 <- ggplot(combined_N1, aes(students, fill = stud)) +
+  geom_density(alpha = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Honests and Liars N =", N1)) +
+  labs(y = NULL) +
+  theme(axis.text.y = element_blank()) +
+  scale_fill_manual(values = c("Honests" = "cyan3", "Liars" = "purple"))
+
+plot_N2 <- ggplot(combined_N2, aes(students, fill = stud)) +
+  geom_density(alpha = 0.2) +
+  theme_minimal() +
+  labs(title = paste("Honests and Liars (N =", N2, ")")) +
+  labs(y = NULL) +
+  theme(axis.text.y = element_blank()) +
+  scale_fill_manual(values = c("Honests" = "cyan3", "Liars" = "purple"))
+
+# Arrange plots side by side
+grid.arrange(plot_N1, plot_N2, ncol = 2)
+
+```
+
+As expected we see that, as $N$ and $q$ grow, these two sub populations become more and more different and thus distinguishable and separable.
+As a result, we also expect the probability of false positives, which we call $\alpha$ and the probability of false negatives, called $\beta$ to decrease (as $N$ and $q$ increase).
+To compute these probabilities we can start by choosing a simple decision rule like \*"Classify a student as liar if the number of Heads is greater or equal to\* $70\%$ of the number of tosses ($N$)".
+
+Next, to compute $\alpha$ we use the CDF of the binomial distribution of the tosses of the honest students to get the probability that the number of heads is $\geq$ than our threshold (given $p = 0.5$).
+Whereas, we compute $\beta$ as the probability that the number of heads is $<$ than our threshold when the tosses come from a binomial distribution with probability of success equal to $q$ .
+
+To summarize: $$
+    \begin{cases}
+      \alpha = \text{P( # Heads| Honest)} \geq 0.7 \\
+      \beta = \text{P(# Heads| Liars) < 0.7} \\
+    \end{cases}
+$$
+
+We first fix $q=0.75$ and see how these probabilities change as we increase $N$.
+
+```{r, echo=FALSE}
+# Parameters
+q <- 0.75
+
+k <- 75
+# Generate sequence of N values
+N <- seq(10, 200, by = 10)
+
+# Initialize matrix to store results
+alpha_beta <- matrix(NA, ncol = 3, nrow = length(N), dimnames = list(NULL, c("N", "alpha", "beta")))
+
+# Loop over N values
+for (i in seq_along(N)) {
+  N1 <- N[i]
+  # Calculate threshold
+  thresh <- N1 * 0.7
+
+  alpha <- 1 - pbinom(thresh, size = N1, prob = p) # Liar | honest
+  beta <- pbinom(thresh - 1, size = N1, prob = q) # honest | liar
+  
+  # Store results in the matrix
+  alpha_beta[i, ] <- c(N1, alpha, beta)
+}
+
+```
+
+```{r, echo=FALSE, fig.align = 'center'}
+# Plot alpha and beta as N grows
+plot(N, alpha_beta[, "alpha"], pch = 5,col = 'cyan3', lwd=2, ylim = c(min(alpha_beta[, c(2, 3)]), max(alpha_beta[, c(2,3)])), xlab = "N", ylab = "Probability", main="α, β vs N")
+points(N, alpha_beta[, "beta"], col = 'orange', pch = 6, lwd = 2)
+legend("topright", legend = c(expression(alpha), expression(beta)), col = c("cyan3", "orange"), pch = c(5, 6) )
+```
+
+With a low number tosses the probability of $\beta$ is high (around $0.25$), while $\alpha$ is significantly lower (around $0.05$).
+As $N$ increases, both values decrease.
+
+Indeed, when $N$ is low, if I count many heads in the tosses of a given student I am already able to (often) correctly classify the student as a liar since the threshold we imposed is quite high.
+However, it also can happen that an honest students gets an high number of heads thus causing me to classify that student as a liar.
+This is more probable when the number of tosses is lower since our threshold is a function of $N$.
+As $N$ grow, this mistake gets smaller and smaller.
+
+On the other hand, since the threshold is quite high and close to $q$ , it will be difficult in the beginning to classify a student as liar.
+Also this mistake will decrease as we require an higher number of tosses.
+
+Of course we expect higher initial probability of errors with a lower $q$ (closer to $p$), since it will be difficult to distinguish the two populations.
+As $q$ increases, both probabilities should go down.
+
+In the plot where we fix $N=50$ and we increase $q$ by $0.02$ from $0.53$ up until $1$.
+The threshold is the same as before.
+
+```{r alpha beta, echo=FALSE}
+# Parameters
+N <- 50
+q <- seq(0.53, 1, by = 0.02)
+
+# Initialize matrix to store results
+alpha_beta <- matrix(NA, ncol = 3, nrow = length(q), dimnames = list(NULL, c("N", "alpha", "beta")))
+
+# Loop over N values
+for (i in seq_along(q)) {
+  
+  q1 <- q[i]
+  # Calculate threshold
+  thresh <- N * 0.7
+  
+  alpha <- 1 - pbinom(thresh, size = N, prob = p) # Liar | honest
+  beta <- pbinom(thresh - 1, size = N, prob = q1) # honest | liar
+  
+  # Store results in the matrix
+  alpha_beta[i, ] <- c(q1, alpha, beta)
+}
+```
+
+```{r, echo=FALSE, fig.align = 'center'}
+# Plot alpha and beta as N grows
+plot(q, alpha_beta[, "alpha"], pch = 5, col = 'cyan3',lwd =2,  ylim = c(min(alpha_beta[, c(2, 3)]), max(alpha_beta[, c(2,3)])), xlab = "q", ylab = "Probability", main="α, β vs q (with N=50)")
+points(q, alpha_beta[, "beta"], col = 'orange', pch = 6, lwd = 2)
+legend("topright", legend = c(expression(alpha), expression(beta)), col = c("cyan3", "orange"), pch = c(5, 6) )
+```
+
+We can see that, since the number of tosses and the threshold are quite high, the probability of False Positives is zero even when $q$ is low.
+Conversely, the probability of False Negatives is very high for low values of $q$ as, according to our prudent decision rule, no student will be classified as liar.
+As the probability of heads for the liars increases, instead, we will be able to spot them more effectively.
+
+Finally, we would like to add that also $k$ influences our estimates of FP and FN.
+We chose $k$ to make the two distributions balanced.
+Indeed, doing so we can more easily carry on our probabilistic analysis.
+Furthermore, if the distributions were unbalanced, then it might be easier to find \alpha and \beta by applying decision rule that favors one of the two classes.
+
+### 1.1 - Score function
+
+We now need to design a **score function** $f(N | \alpha^*, \beta^*)$ that, for every value of $N$ and two selected target error level $\alpha^*$ and $\beta^*$ that we want to achieve, outputs a numerical evaluation of the strategy.
+Our strategy should, indeed, optimize this score function.
+
+Restating the objective: we want $\alpha$ and $\beta$ to get as close as possible to $\alpha^*$ and $\beta^*$, while keeping the number of tosses reasonable.
+
+$$
+\alpha -\alpha^* \rightarrow 0
+\\
+\beta -\beta^* \rightarrow 0
+\\
+$$
+
+Of course we don't care if the deviations from the target values are positive or negative so we consider the absolute value of the differences.
+Thus, we are interested in **minimizing** these differences.
+As stated above, we also want to introduce $N$ in our function.
+In particular, we want to penalize values of $N$ that are too big if there isn't a sensible improvement in how close we got to the target values leveraging those extra tosses.
+However, we do not want the function to be dominated by $N$ as, when we try to minimize it, the main way to do it would be reduce $N$.
+So we take the logarithm of this value.
+Another reason to introduce $N$ in the equation is that the score function would otherwise be monotonically decreasing (up to a certain value of $N$) if we require low target values.
+
+Our score function explicitly is:
+
+$$
+f(N|\alpha^*,\beta^*) = (|\alpha - \alpha^*| + |\beta - \beta^*|)\cdot \log N
+$$
+
+(We notice that this function resembles the Absolute Loss)
+
+#### Literature:
+
+The first part of the score is actually the Manhattan distance.
+The initial component of the score reflects the comparison between two crucial quantities of interest: alpha and beta.
+Rather than directly measuring the distance between coordinates, we assess the differences or errors associated with these quantities.
+This approach allows us to capture and evaluate the discrepancies in alpha and beta, offering a nuanced understanding of their relationship without delving into the technicalities of distance calculations.
+
+After having defined our score function we will try to evaluate different strategies, i.e. we will compute for different values of $N$ and $thresholds$ the score function, and then output the values that minimize it.
+We start by fixing $q=0.6$ as with a $q$ too big the problem would become quite trivial (indeed, not many tosses and an high threshold would be enough to get small values of $\alpha$ and $\beta$).
+We also assume that we want to obtain low probabilities of False Positives and False Negatives, which is reasonable.
+In particular we are more concerned with $\alpha$, thus we are going to require a smaller $\alpha^*$, since it is worse to accuse a student of being a liar even when he is honest.
+In particular, we decide that we want a probability of False Positives of $5\%$ and a probability of False Negatives of $15\%$.
+
+```{r params}
+# Define the score function
+score_function <- function(a, b, alpha, beta, N) {
+  (abs(a - alpha) + abs(b - beta))*log(N)
+}
+
+# Define Parameters
+q <- 0.6
+a_target <- 0.05
+b_target <- 0.15
+```
+
+```{r score minim, echo=FALSE}
+lowest_score <- Inf
+optimal_N <- NULL
+optimal_threshold <- NULL
+
+scores <- matrix(NA, nrow = 199, ncol = 200)
+k <- 75
+
+for (N in seq(2, 200, by = 1)) {
+  for (threshold in seq(1, N, by = 1)) {
+    alpha <- 1 - pbinom(threshold, size = N, prob = p) # Liar | honest
+    beta <- pbinom(threshold - 1, size = N, prob = q) # honest | liar
+    
+    current_score <- score_function(a_target, b_target, alpha, beta, N)
+    
+    scores[N - 1, threshold] <- current_score
+    
+    if (current_score < lowest_score) {
+      lowest_score <- current_score
+      optimal_N <- N
+      optimal_threshold <- threshold
+    }
+  }
+}
+
+cat("Optimal N:", optimal_N, "\n", "Optimal Threshold:", optimal_threshold, "\n", "Lowest Score:", lowest_score)
+
+row_names <- seq(2, 200, by = 1)
+rownames(scores) <- row_names
+
+plot_ly(z = ~scores, type = "surface") %>%
+  layout(scene = list(
+    xaxis = list(title = "Threshold"),
+    yaxis = list(title = "N", tickvals = seq(0, 200, by = 20), ticktext = seq(0, 200, by = 20)),
+    zaxis = list(title = "Scores")),
+    margin = list(l = 0, r = 0, b = 0, t = 0)
+  )
+```
+
+Indeed, what we see is that, as we increase $N$, $\alpha$ and $\beta$ become smaller and smaller, thus initially the score gets smaller as we converge towards the values of $\alpha^*$ and $\beta^*$.
+Nevertheless, after $N=153$ and a threshold of $86$ heads, the score begins to rise again either because the probabilities are too small and therefore different from our target values or because the bigger values of $N$ are not justified by the improvement in "performance".
+Indeed, if we try to compute the probability of FP and FN with these parameters we get
+
+```{r, echo=FALSE}
+cat("Alpha:", 1 - pbinom(optimal_threshold, optimal_N, p), "\n", "Beta:", pbinom(optimal_threshold - 1, optimal_N, q))
+```
+
+The probability of false positives is very close to our target $0.05$.
+The probability of false negatives is very close to our target $0.15$ too.
+
+Next, we try to use a score function more similar to the Squared Loss (instead of the Absolute Loss), to see if we can notice big differences in its results, i.e. the score function will be
+
+$$
+f(N|\alpha^*,\beta^*) = ((\alpha - \alpha^*)^2 + (\beta - \beta^*)^2)\cdot \log N
+$$
+
+```{r, echo=FALSE}
+# Define the score function
+score_function <- function(a, b, alpha, beta, N) {
+  ((a - alpha)^2 + (b - beta)^2)*log(N)
+}
+
+# Parameters
+p <- 0.5  
+q <- 0.6
+
+lowest_score <- Inf
+optimal_N <- NULL
+optimal_threshold <- NULL
+
+scores <- matrix(NA, nrow = 199, ncol = 200)
+
+for (N in seq(2, 200, by = 1)) {
+  for (threshold in seq(1, N, by = 1)) {
+    alpha <- 1 - pbinom(threshold, size = N, prob = p) # Liar | honest
+    beta <- pbinom(threshold - 1, size = N, prob = q) # honest | liar
+    
+    current_score <- score_function(a_target, b_target, alpha, beta, N)
+    
+    scores[N - 1, threshold] <- current_score
+    
+    if (current_score < lowest_score) {
+      lowest_score <- current_score
+      optimal_N <- N
+      optimal_threshold <- threshold
+    }
+  }
+}
+
+cat("Optimal N:", optimal_N, "\n", 
+    "Optimal Threshold:", optimal_threshold, "\n",
+    "Lowest Score:", lowest_score, "\n")
+
+```
+
+We see that we get exactly the same results, thus we are going to keep using the absolute difference.
+One further modification we could do to the score function is to scale down $N$ in a different way.
+For example we could use the square root, thus obtaining a score function of this type
+
+$$
+f(N|\alpha^*,\beta^*) = (|\alpha - \alpha^*| + |\beta - \beta^*|)\cdot \sqrt N
+$$
+
+```{r, echo=FALSE}
+# Define the score function
+score_function <- function(a, b, alpha, beta, N) {
+  (abs(a - alpha) + abs(b - beta))*sqrt(N)
+}
+
+# Parameters
+p <- 0.5  
+q <- 0.6
+
+lowest_score <- Inf
+optimal_N <- NULL
+optimal_threshold <- NULL
+
+scores <- matrix(NA, nrow = 199, ncol = 200)
+
+for (N in seq(2, 200, by = 1)) {
+  for (threshold in seq(1, N, by = 1)) {
+    alpha <- 1 - pbinom(threshold, size = N, prob = p) # Liar | honest
+    beta <- pbinom(threshold - 1, size = N, prob = q) # honest | liar
+    
+    current_score <- score_function(a_target, b_target, alpha, beta, N)
+    
+    scores[N - 1, threshold] <- current_score
+    
+    if (current_score < lowest_score) {
+      lowest_score <- current_score
+      optimal_N <- N
+      optimal_threshold <- threshold
+    }
+  }
+}
+
+cat("Optimal N:", optimal_N, "\n", 
+    "Optimal Threshold:", optimal_threshold, "\n",
+    "Lowest Score:", lowest_score, "\n")
+
+```
+
+Again we notice that with this $q$ , $\alpha^*$ and $\beta^*$ there doesn't seem to be much difference.
+
+Finally, a last tweak to the score function could be a different weighting of the two differences.
+Specifically, since we are more concerned with the probability of false positives we could give more weight to the first difference of our score function, obtaining something like: $$
+f(N|\alpha^*,\beta^*) = (10 \cdot |\alpha - \alpha^*| + |\beta - \beta^*|)\cdot \log N
+$$
+
+```{r, echo=FALSE}
+# Define the score function
+score_function <- function(a, b, alpha, beta, N) {
+  (10*abs(a - alpha) + abs(b - beta))*log(N)
+}
+
+# Parameters
+p <- 0.5  
+q <- 0.6
+
+lowest_score <- Inf
+optimal_N <- NULL
+optimal_threshold <- NULL
+
+scores <- matrix(NA, nrow = 199, ncol = 200)
+
+for (N in seq(2, 200, by = 1)) {
+  for (threshold in seq(1, N, by = 1)) {
+    alpha <- 1 - pbinom(threshold, size = N, prob = p) # Liar | honest
+    beta <- pbinom(threshold - 1, size = N, prob = q) # honest | liar
+    
+    current_score <- score_function(a_target, b_target, alpha, beta, N)
+    
+    scores[N - 1, threshold] <- current_score
+    
+    if (current_score < lowest_score) {
+      lowest_score <- current_score
+      optimal_N <- N
+      optimal_threshold <- threshold
+    }
+  }
+}
+
+cat("Optimal N:", optimal_N, "\n", 
+    "Optimal Threshold:", optimal_threshold, "\n",
+    "Lowest Score:", lowest_score, "\n")
+
+```
+
+We notice that putting more weight on $\alpha$ leads to an higher threshold and an higher $N$.
+If we now compute again these probabilities we get:
+
+```{r, echo=FALSE}
+cat("Alpha:", 1 - pbinom(optimal_threshold, optimal_N, p), "\n", "Beta:", pbinom(optimal_threshold - 1, optimal_N, q))
+```
+
+Indeed, $\alpha$ got closer to $\alpha^*$ (however $\beta$ is now more distant from $\beta^*$).
+
+Now we want to see how the optimal $N$ and threshold vary as $q, \alpha^*, \beta^*$ change.
+To this end we are going to use our first score function.
+
+```{r, echo=FALSE}
+score_function <- function(a, b, alpha, beta, N) {
+  (abs(a - alpha) + abs(b - beta)) * log(N)
+}
+
+# Parameters
+p <- 0.5
+
+results_table <- data.frame()
+
+for (q in seq(0.51, 0.91, by = 0.05)) {
+  for (alpha_target in seq(0.01, 0.3, by = 0.02)) {
+    for (beta_target in seq(0.01, 0.3, by = 0.02)) {
+      lowest_score <- Inf
+      optimal_N <- NULL
+      optimal_threshold <- NULL
+      
+      scores <- matrix(NA, nrow = 199, ncol = 200)
+      
+      for (N in seq(2, 200, by = 1)) {
+        for (threshold in seq(1, N, by = 1)) {
+          alpha <- 1 - pbinom(threshold, size = N, prob = p) # Liar | honest
+          beta <- pbinom(threshold - 1, size = N, prob = q)  # honest | liar
+          
+          current_score <- score_function(alpha_target, beta_target, alpha, beta, N)
+          
+          scores[N - 1, threshold] <- current_score
+          
+          if (current_score < lowest_score) {
+            lowest_score <- current_score
+            optimal_N <- N
+            optimal_threshold <- threshold
+          }
+        }
+      }
+      
+      result <- data.frame(
+        Q = q,
+        Alpha_Target = alpha_target,
+        Beta_Target = beta_target,
+        Optimal_N = optimal_N,
+        Optimal_Threshold = optimal_threshold,
+        Lowest_Score = lowest_score
+      )
+      
+      results_table <- rbind(results_table, result)
+    }
+  }
+}
+
+# Show the first few rows of the results_table
+head(results_table)
+
+```
+
+```{r, echo=FALSE, fig.align='center'}
+
+# Create a scatter plot for Optimal N against Q
+ggplot(results_table, aes(x = Q, y = Optimal_N)) +
+  geom_point(color = "blue") +
+  labs(title = "Optimal N for different values of q", x = "q", y = "Optimal N") +
+  theme_minimal()
+
+```
+
+In this plot we can see the best value of $N$ for increasing values of $q$ and different $\alpha^*$ and $\beta^*$.
+We notice that, as we would expect, higher $N$ are required for smaller target values when $q$ is small.
+As the probability of heads of the liars increases the number of tosses required decreases for every possible target probability.
+
+In the next plot we isolate the cases of $\alpha^*=$ 0.05 and 0.17, and $\beta^*=$ 0.05 and 0.19 and we plot them to better understand what happens.
+
+```{r, echo=FALSE, fig.align='center'}
+# Filter data for different values of Alpha_Target and Beta_Target
+filtered_data <- subset(results_table, Alpha_Target %in% c(0.05, 0.17) & Beta_Target %in% c(0.05, 0.19))
+
+# Create scatter plots for Optimal N against Q with facets
+ggplot(filtered_data, aes(x = Q, y = Optimal_N)) +
+  geom_point(color = "blue", size = 3, alpha = 0.6) +  # Adjust point size and transparency
+  labs(title = "Optimal N for Different Alpha and Beta Targets", x = "q values", y = "Optimal N") +
+  facet_grid(Alpha_Target ~ Beta_Target, scales = "free", 
+             labeller = labeller(Alpha_Target = label_both, Beta_Target = label_both)) +  # Add labels for facets
+  theme_minimal() +
+  theme(  # Adjust plot elements and aesthetics
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(face = "bold", size = 12),
+    axis.text = element_text(size = 10),
+    strip.text = element_text(face = "bold", size = 10),
+    panel.spacing = unit(1, "lines"),  # Increase space between panels
+    plot.margin = margin(1, 1, 1, 1, "cm")  # Adjust margins
+  ) +
+  theme(aspect.ratio = 1)  # Set aspect ratio for better visibility
+
+```
+
+We can see that as $q$ increases the number of tosses required drastically decreases.
+Instead, when $q$ is very to close to $p$, the additional cost required by making more tosses doesn't compensate for the improvement in how close we get to the target values, thus small values of $N$ are preferred.
+Moreover, we can notice that if we aim for low $\alpha^*$ more tosses are generally required, while if we aim for low $\beta^*$ less tosses are preferred.
+From the bottom right plot we can also notice that if higher target values are allowed then we will be able to reach them even when $q$ is quite close to $p$ (at the cost of tossing the coin many times).
+
+### 1.2 - Time Constraint
+
+Now, beside the α − β targets, we assume we're also working under a strict time constraint: knowing that each flip costs $3$ seconds, we want to check at least half the class in no more than $T$ minutes.
+
+To handle this new scenario we tweak the original score function to get a new one $g(N | \alpha, \beta, T)$.
+Restating our objective: now we want that at least half the class, i.e. $\frac{n}{2}$ students to toss a coin $N$ times, with each toss requiring $3$ seconds, for a total of, at least $\frac{n}{2} \cdot N \cdot 3$ seconds.
+We want this quantity to be $\leq$ $T \cdot 60$ seconds.
+So we have to introduce a penalization if the difference between these two times is high.
+In particular, for simplicity we are going to take the absolute value of the difference since it is, as we also have seen in the results above, very difficult to get low $\alpha$ and $\beta$ when $q$ is close to $p$ and $N$ is low.
+Again we need to scale down this difference otherwise it will dominate completely the function.
+
+Thus we have the following score function: $$
+g(N| \alpha^*, \beta^*, T) = \log(N) \cdot (|\alpha - \alpha^*| + |\beta - \beta^*|) + \sqrt{\left(|\frac{N \cdot n}{40} - T|\right)}
+$$
+
+Again we will try to **minimize** this function.
+We fix $q=0.6$, $\alpha^*=0.05$ and $\beta^*=0.15$
+
+```{r}
+# Define the score function
+score_function2 <- function(a, b, T, alpha, beta, N, n) (abs(a - alpha) + abs(b - beta))*log(N) + sqrt(abs((3 * N * (n / 2)) / 60 - T) + 0.000001)
+
+# Set other variables
+T <- 15
+n <- 150
+a_target <- 0.05
+b_target <- 0.15
+q <- 0.6
+p <- 0.5
+```
+
+```{r, echo=FALSE}
+
+lowest_score <- 100
+optimal_N <- NULL
+optimal_threshold <- NULL
+
+scores <- matrix(NA, nrow = 49, ncol = 50)
+i = 0
+for (N in seq(2, 50, by = 1)) {
+  i = i + 1
+  j = 0
+  for (threshold in seq(2, N, by = 1)) {
+    j = j + 1
+    
+    
+    alpha <- 1 - pbinom(threshold, size = N, prob = p) # Liar | honest
+    beta <- pbinom(threshold - 1, size = N, prob = q)
+    
+    current_score <- score_function2(a_target, b_target, T, alpha, beta, N, n)
+    
+    scores[i, j] <- current_score
+    
+    # Update the optimal values if the current score is higher
+    if (current_score < lowest_score) {
+      lowest_score <- current_score
+      optimal_N <- N
+      optimal_threshold <- threshold
+    }
+  }
+}
+cat("Optimal N:", optimal_N, "\n", "Optimal Threshold:", optimal_threshold, "\n", "Lowest Score:", lowest_score, "\n")
+
+row_names <- seq(2, 50, by = 1)
+# Assign row names to the matrix
+rownames(scores) <- row_names
+
+
+# Create the plot
+plot_ly(z = ~scores, type = "surface") %>%
+  layout(scene = list(xaxis = list(title = "Threshold", tickvals=1:50),
+                      yaxis = list(title = "N", tickmode = "array", 
+                                   tickvals = 2:length(row_names), ticktext = row_names),
+                      zaxis = list(title = "Scores")))
+
+```
+
+The graph shows the scores obtained by varying $N$ and the threshold.
+We see that, as we are requiring a target $\alpha$ smaller than $\beta$ the threshold will remain quite high.
+Moreover, we can notice that the function penalizes, as we desire, heavily increasing values of $N$ when $T$ is not as big.
+Indeed we want the time required to carry on our testing to remain smaller than $T$.
+
+In particular, for $T=15$ and $q=0.6$ we notice that the optimal $N$ is equal to $4$ and the optimal threshold to $2$.
+We can notice that $3 \cdot 4 \cdot 75$ (i.e. $3 \cdot N \cdot n/2$) is equal to $15 \cdot 60$ (i.e. $T \cdot 60$).
+This means we are finding the values of tosses and threshold that give us the probability of false positives and false negatives closer to the target ones respecting the time constraint imposed by $T$.
+Even if, with these parameters, we obtain
+
+```{r, echo=FALSE}
+cat("Alpha:", 1 - pbinom(optimal_threshold, optimal_N, p), "\n", "Beta:", pbinom(optimal_threshold - 1, optimal_N, q))
+```
+
+The rigid time constraint doesn't allow us to improve further.
+However, by relaxing $T$ or increasing $q$, we notice that it is easier to get close to our targets.
+Specifically, if we want to keep $T$ fixed, we should make sure $q$ is around at least $0.7$, since we would get $N=4$ and $threshold=3$, which would give us $\alpha=0.0625$ and $\beta=0.34$ which are much closer to our targets.
+
+Instead, if we have a low value of $q$ as before, we should allocate more time to our testing procedure, as with $T=30$ we would get $N=8$ and $threshold = 4$, which wouldn't help us much in reducing the probability of False Positives ($0.36$), but at least would bring the probability of False Negatives to $0.17$, again much closer to our desired target.
+
+Since we have this rigid time constraint and we saw we cannot achieve low target probabilities, a good idea could be to choose to prioritize one of the two.
+For this reason we use a weighted score function, as we already did in exercise 1.1, that gives more importance to a more precise $\alpha$.
+In particular, we are going to increase its weight ten fold as we want to heavily penalize big differences.
+
+```{r, echo=FALSE}
+# Define the score function
+score_function2 <- function(a, b, T, alpha, beta, N, n) (10*abs(a - alpha) + abs(b - beta)^2)*log(N) + sqrt(abs((3 * N * (n / 2)) / 60 - T) + 0.000001)
+
+# Other variables
+T <- 15
+n <- 150
+a_target <- 0.05
+b_target <- 0.15
+p <- 0.5
+q <- 0.6
+
+
+lowest_score <- 100
+optimal_N <- NULL
+optimal_threshold <- NULL
+
+scores <- matrix(NA, nrow = 49, ncol = 50)
+i = 0
+for (N in seq(2, 50, by = 1)) {
+  i = i + 1
+  j = 0
+  for (threshold in seq(2, N, by = 1)) {
+    j = j + 1
+    
+    
+    alpha <- 1 - pbinom(threshold, size = N, prob = p) # Liar | honest
+    beta <- pbinom(threshold - 1, size = N, prob = q)
+    
+    current_score <- score_function2(a_target, b_target, T, alpha, beta, N, n)
+    
+    scores[i, j] <- current_score
+    
+    # Update the optimal values if the current score is higher
+    if (current_score < lowest_score) {
+      lowest_score <- current_score
+      optimal_N <- N
+      optimal_threshold <- threshold
+    }
+  }
+}
+cat("Optimal N:", optimal_N, "\n", "Optimal Threshold:", optimal_threshold, "\n", "Lowest Score:", lowest_score)
+```
+
+Indeed, we can notice that now, keeping $q=0.6$, the threshold is higher (it went from $2$ to $3$), since now we are focusing much more on False Positives and an higher threshold minimizes this kind of error (while increasing the False Negatives).
+Let's compute $\alpha$ and $\beta$:
+
+```{r, echo=FALSE}
+cat("Alpha:", 1 - pbinom(optimal_threshold, optimal_N, p), "\n", "Beta:", pbinom(optimal_threshold - 1, optimal_N, q))
+```
+
+We see that $\alpha$ is very close to our target, while $\beta$ is quite far.
+
+## Exercise 2
+
+### Setup
+
+In this task, our objective is to delve deeper into the concept of Kernel Density Estimation (KDE).
+It is crucial to emphasize the significance of parameter selection to optimize the fit with the real population.
+
+The bandwidth determines the width of the kernel, influencing the smoothness of the estimated density.
+A smaller bandwidth results in a more sensitive estimation that captures finer details in the data.
+On the other hand, a larger bandwidth produces a smoother estimate, potentially overlooking local variations in the distribution.
+So, selecting an appropriate bandwidth is crucial for achieving a balance between capturing the underlying distribution's features and avoiding overfitting or underfitting.
+
+Specifically, we consider the true population distribution denoted as $F_X(\cdot)$, where the random variable $X$ is assumed to follow a Beta distribution with user-chosen parameters $\alpha$ and $\beta$.
+For the purposes of this exercise, we employ a Kernel Density Estimator $f_{bh}(\cdot)$ with a tunable bandwidth parameter $h > 0$ as the sole parameter, and in this case, we opt for a boxcar/rectangular kernel.
+
+The primary steps involve implementing the Kernel Density Estimator with the selected boxcar kernel and bandwidth $h$, computing its quantile function, and then comparing it with the true quantile function.
+To quantify the discrepancy between the two quantile functions, we use the Wasserstein distance.
+Subsequently, an appropriate $h$ is chosen based on the assurance that this bandwidth parameter ensures the Wasserstein distance is below a specified threshold $\epsilon$.
+
+### Boxcar Kernel
+
+Statistically speaking, a boxcar function or boxcar kernel can be related to a rectangular window in the context of smoothing or filtering operations.
+Boxcar kernel is often used in time-series analysis or signal processing.
+The boxcar function acts as a weight that gives equal importance to all data points within a specified interval.
+
+As by the definition:
+
+$$
+\displaystyle \widehat{f}_h(x) = \dfrac{1}{nh}\sum_{i=1}^n K\left(\dfrac{x_i-x}{h}\right)
+$$
+
+where
+
+$$
+K = \frac{1}{2} 
+$$
+
+is the Boxcar kernel.
+
+And each value $x_i$ gets smoothed if $$-1<\dfrac{x_i-x}{h}<1  \qquad\qquad \Rightarrow \qquad\qquad x_i-h<x<x_i+h 
+$$
+
+as the boxcar transformation is applied for $x \in [-1,1]$.
+
+In general we can't integrate smoothly because we don't know where $x_i$ are and the set of $x_i$ depends on too many parameters and we would require a decision tree conversely to just the two parameters required for example for a Beta distribution.
+However, always in the general case, we can integrate considering the integral for intervals or leveraging cumulative functions, techinque which we will also apply to our problem later on for computing the CDF for computational efficiency.
+
+In the case of a Beta distribution we note that extreme values of $x_i$ are smoothed by incorporating values outside of the support of the beta distribution, leading to potential issues.
+
+### 2.1 - Implementation of Boxcar KDE
+
+We implement the boxcar kernel as by definition.
+We then use a cumulative function to derive the CDF leveraging the notion of integration by summation since it is considerably faster than the function \*integrate()\* and gives good approximations when we have enough $x$.
+Moreover, even the integrate() function discretizes the space (we are aware of the fact that the discretization performed by the function is more precise on average, but the time required to run it is also notably higher).
+
+```{r}
+boxcar_kde <- function(x, data, h=0.5) {
+  n <- length(x)
+  t1 <- 1/(n*h)
+  t2 <- sapply(x, function(xi) {
+    sum(0.5 * (abs((xi - data) / h) <= 1))
+  })
+return(t1*t2)
+}
+
+
+boxcar_cdf <- function(x, data, h = 0.5) {
+  pdf_values <- boxcar_kde(x, data, h)
+  cdf_values <- cumsum(pdf_values)/sum(pdf_values)
+  return(cdf_values)
+}
+
+```
+
+We proceed and fulfill the task of implementing the quantile function of our kernel.
+
+The quantile function and its implementation in the boxcar kernel context offer a mean to understand the distribution in terms of percentiles.
+
+```{r boxcar quantile, fig.align = 'center'}
+boxcar_quantile <- function(cdf_values, x_values, probs) {
+  sapply(probs, function(p) {
+    idx <- which.min(abs(cdf_values - p))
+    return(x_values[idx])
+  })
+}
+```
+
+This function estimates quantiles by finding the $x$ values associated with probabilities using the closest available CDF values.
+This method gets less precise when the CDF values are not dense.
+
+In the next step, we will introduce some matemathical tools to estimate the difference in terms of quantiles, so differences between quantile functions of the beta and of the kernel respectively.
+
+We especially focus on the Wasserstein distance (a loss metric) and, as anticipated, we expect favorable performance when the two quantile functions closely resemble each other.
+By summing the distances and taking the absolute value, we can see how effectively the boxcar kernel's CDF aligns with the true CDF of the underlying distribution.
+
+Indeed the Wasserstein function measures the dissimilarity in their shapes.
+Our objective is to minimize this Wasserstein distance.
+Additionally, the *boxcar_quantile* function facilitates the extraction of quantiles from the boxcar kernel's CDF, providing a simple evaluation of the model's representation of various percentiles within the distribution.
+
+### 2.2 - First application
+
+For the first case, we have chosen $\alpha=2$ and $\beta=2$.
+These parameter values define the shape of the beta distribution.
+We proceed by calculating and plotting the distributions.
+We also fix a bandwidth for the estimator.
+
+```{r, fig.align = 'center'}
+# We set the parameter and the seed first
+set.seed(13)
+a <- 2
+b <- 2
+
+NN <- 500
+# We name data1, we'll use it later on.
+data1 <- rbeta(NN, a, b)
+x_vals <- seq(0, 1, length.out = length(data1))
+
+band <- 0.1
+```
+
+```{r,echo=FALSE, fig.align = 'center'}
+hist(data1, density = 50, probability = T, breaks= 15,main = expression("Beta" ~ alpha == 2  ~ beta==2),
+     col=rgb(0.6,0.3,0.08,alpha=0.25), xlab='Support', yaxt ="n")
+lines(x_vals, boxcar_kde(x_vals, data1, band), col= 'cyan3', lwd=3,lty=1)
+lines(x_vals, dbeta(x_vals, a, b), col = 'orchid1',lwd=2,lty=1)
+legend("topleft", legend = c('True density', expression(boxcar_kde)), 
+       col = c( "orchid1","cyan3") ,lty=c(1,1), bty="n", cex=0.6)
+```
+
+In this graph we can compare how well the *Boxcar_kde* aligns with the true Beta distribution taking into account the given data, which is sampled from a Beta distribution with the parameters specified above.
+The cyan line reflects the approximation of the underlying distribution provided by the *boxcar_kde*.
+The bandwidth parameter ($0.1$) influences the width of the kernel, affecting the smoothness of the estimated density.
+A smaller bandwidth results in a more sensitive estimation, whereas a larger bandwidth produces a smoother estimate.
+
+To show this we make another plot with a larger $h$.
+
+```{r, fig.align = 'center', echo=FALSE}
+# We set the parameter and the seed first
+set.seed(13)
+a <- 2
+b <- 2
+
+NN <- 500
+# We name data1, we'll use it later on.
+data1 <- rbeta(NN, a, b)
+x_vals <- seq(0, 1, length.out = length(data1))
+
+band <- 0.25
+
+hist(data1, density = 50, probability = T, breaks= 15,main = expression("Beta" ~ alpha == 2  ~ beta==2),
+     col=rgb(0.6,0.3,0.08,alpha=0.25), xlab='Support', yaxt ="n")
+lines(x_vals, boxcar_kde(x_vals, data1, 0.2), col= 'cyan3', lwd=3,lty=1)
+lines(x_vals, dbeta(x_vals, a, b), col = 'orchid1',lwd=2,lty=1)
+legend("topleft", legend = c('True density', expression(boxcar_kde)), 
+       col = c( "orchid1","cyan3") ,lty=c(1,1), bty="n", cex=0.6)
+```
+
+We notice that the KDE is smoother but also less precise. Indeed, with a low bandwith we're more influenced by the data and get a better fit (however we risk to overfit).
+
+In our scenario we have a Beta distribution with chosen $\alpha$ and $\beta$ and we want to compute the Wasserstein distance with the quantile transformation.
+We underline that setting a bandwidth for the kernel directly impacts our approximation of the data and, eventually our loss.
+
+```{r, fig.align = 'center'}
+wasser <- function(z){
+  cdf <- boxcar_cdf(x_vals, data1, band)
+  return(abs(qbeta(z, a, b) - boxcar_quantile(cdf, x_vals, z)))
+}
+
+```
+
+We now show the CDFs and Quantile function comparing the true distribution and the approximated kernel density estimator function.
+
+```{r, echo=FALSE, fig.align = 'center'}
+band <- 0.1
+par(mfrow=c(1,2))
+prs <- seq(0, 1, length.out = NN)
+cdf_vals <- boxcar_cdf(x_vals, data1, band)
+plot(cdf_vals, type = 'l', main = "CDF", lwd=5, xaxt="n", xlab= "", ylab="cdf")
+lines(pbeta(x_vals, a , b), col='orange', lty =2, lwd = 3)
+grid(nx=NULL, ny=NULL, lty=2, col='grey')
+legend("topleft", legend = c('Estimated CDF', 'True CDF'), col = c("orange", "black"), lty=c(2, 1), bty="n")
+
+# Plotting the quantile of the boxcar transformation
+plot(boxcar_quantile(cdf_vals, x_vals, prs), type = 'l', xaxt="n", xlab="", 
+     lwd=5, main = "Quantiles", ylab = "quantiles")
+lines(qbeta(prs, a, b), col = 'red', lty =2, lwd = 3)
+grid(nx=NULL, ny=NULL, lty=2, col='grey')
+legend("topleft", legend = c('Estimated Q', 'True Q'), col =  c("red", "black"), lty=c(2, 1), bty="n")
+
+```
+
+The estimated CDF and quantile function seem to be close to the true functions.
+This is also thanks to the small bandwith we chose.
+
+We now define a new function which aims to identify the $h$ that satisfies the following condition: $$ \underset{h \in [0,1]}{max} | \qquad W_{L_1,1} (f, \widehat(f))\leq \epsilon
+$$ where $$W_{L_1,1} (f, \widehat(f)) = \int_0^1|F^{-1}(z)-\widehat{F}_h^{-1}(z)|dz$$ where $F^{-1}(z)$ and $ \widehat{F}_h^{-1}(z)$ are respectively the quantile functions of the beta distribution and it's estimation.
+
+The function `find_bandwidth` computes the Wasserstein distance for a sequence of bandwidth values, keeps only those satisfying a specific inequality, and then selects the maximum value.
+This ensures the coarsest approximation for the bandwidth, guaranteeing an approximation lower than or equal to epsilon. It also returns a plot of all the bandwiths computed and the threshold. Then prints the $h$ selected that respects our condition.
+
+```{r, echo=FALSE, warning=FALSE, fig.align = 'center'}
+find_bandwidth<-function(epsilon=0.01,alpha=2,beta=2,data){
+  vals <- c()
+  bands <- seq(0.05, 1, by= 0.02)
+  j = 0
+  for (i in bands){
+    j = j + 1
+    wasser <- function(z){
+    abs(qbeta(z, a, b) - boxcar_quantile(boxcar_cdf(x_vals, data, i), x_vals, z))
+    }
+    vals[j] <- integrate(wasser, 0, 1, subdivisions = 1000)$value
+  }
+  
+  # Stores vals as a global variable to use it for the plot
+  assign("vals", vals, envir = .GlobalEnv)
+  
+  if (sum(vals < epsilon) >= 1) {
+    optimal_bandwidth <- max(bands[vals < epsilon])
+    paste("Target h:", optimal_bandwidth)
+    
+    par(mfrow=c(1,1))
+    plot(vals,bands, col= "navy", xlab='Wasserstein distance', ylab= "bandwidth (h)",
+         main = "Bandwidths", pch=19)
+    grid(nx=NULL, ny=NULL, lty=2, col='grey')
+    points( max(vals[which(vals < epsilon)]),optimal_bandwidth,cex=2 ,pch=1, col="cyan")
+    abline(v=epsilon, col ="forestgreen", lwd=2)
+  } else {
+    cat("No bandwidth satisfies can guarantee", epsilon, "precision\n")
+  }
+}
+
+```
+
+```{r, echo=FALSE, warning=FALSE, fig.align = 'center'}
+epsilon<- 0.05
+find_bandwidth(epsilon,data=data1)
+```
+
+The navy curve represents how the Wasserstein distance changes as the bandwidth of the *boxcar_kde* varies.
+The y-axis represents the different bandwidth values, and the x-axis represents the corresponding Wasserstein distances.
+The green line represent the threshold $\epsilon$ we seek.
+
+We see that as $h$ increases also the Wasserstein distance increases as we get less precise estimates.
+Choosing always the coarsest approximation for the bandwidth allows us to avoid picking too small values of $h$ that would fit the data too well (overfit) and not be able to generalize and understand the true shape of the distribution.
+
+Now we will change the parameters $\alpha$ and $\beta$ and then repeat all the steps above.
+
+```{r beta2, echo=FALSE, fig.align = 'center'}
+set.seed(123)
+a <- 5
+b <- 2
+band <- 0.1
+data2 <- rbeta(NN, a, b)
+x_vals <- seq(0, 1, length.out = length(data2))
+hist(data2, density = 70, probability = T, breaks= 15,main = expression("Beta" ~ alpha == 5 ~ beta==2), 
+     xlab = "Support of X", ylab = "density", col=rgb(0.3,0.8,0.8,0.15),xlim=c(0,1), yaxt="n")
+lines(x_vals, boxcar_kde(x_vals, data2, 0.1), col= 'green', lwd=3)
+lines(x_vals, dbeta(x_vals, a, b), col = 'cyan1',lwd=3,lty=2)
+legend("topleft", legend = c(expression('Boxcar KDE'),expression('Beta PDF')), 
+       col = c( "green","cyan1") ,lty=c(1,2), bty="n", cex=0.7)
+```
+
+The graph compares the density distribution of *data2* (histogram) with the Boxcar Kernel Density Estimate (green) and the true Beta Density (cyan).
+It describes how well the Boxcar Kernel Density Estimate aligns with the true density of the data.
+Even though the data is less regular than before, the boxcar KDE function is still able to capture quite well the true distribution.
+
+Next, we compute again the CDF and quantile function.
+
+```{r beta2 cdf quant, fig.align = 'center', echo=FALSE}
+par(mfrow=c(1,2))
+prs <- seq(0, 1, length.out = NN)
+cdf_vals <- boxcar_cdf(x_vals, data2, band)
+plot(cdf_vals, type = 'l', main = "CDF", ylab = "cdf", xaxt ="n", xlab="X", lwd = 5)
+lines(pbeta(x_vals, a , b), col='orange', lty = 2, lwd =3)
+grid(nx=NULL, ny=NULL, lty=2, col='grey')
+legend("topleft", legend = c('Estimated CDF', 'True CDF'), col = c( "orange", "black"), lty=c(2, 1), bty="n")
+
+
+plot(boxcar_quantile(cdf_vals, x_vals, prs), type = 'l', main = "Quantile", ylab = "quantiles",
+     xaxt = "n", xlab="X", lwd=5)
+lines(qbeta(prs, a, b), col = 'red2', lwd=3, lty=2)
+grid(nx=NULL, ny=NULL, lty=2, col='grey')
+legend("topleft", legend = c('Estimated Q', 'True Q'), col = c( "red2", "black"), lty=c(2, 1), bty="n")
+
+```
+
+We see that our estimated CDF is still able to capture the shape of the distribution.
+
+Finally, we compute again the Wasserstein distances.
+
+```{r, warning=FALSE, fig.align = 'center'}
+find_bandwidth(epsilon,a,b,data2)
+```
+
+We can notice than in both case the maximum distance is up to around $0.25$ in these two cases. It means that there's not an $h$ so bad that the approximation is extremely distant. We can also notice tough that the range varies a lot depending on the parameters of the Beta. Especially when the Beta distribution has $\alpha=\beta$ and $h$ is high, it performes poorly.

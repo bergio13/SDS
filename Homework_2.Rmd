@@ -1,0 +1,1903 @@
+---
+title: "SDS-HW2"
+author: "Giorgio Bertone, Stefano Rinaldi, Marina Zanoni"
+date: "2023-12-28"
+output: 
+  prettydoc::html_pretty:
+    theme: architect
+    highlight: pygments 
+    toc: yes
+    fig_caption: yes
+  pdf_document:
+    toc: yes
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+library(truncnorm)
+library(parallel)
+
+```
+
+```{=html}
+<style>
+body {
+text-align: justify}
+</style>
+```
+# Homework 2
+
+## Part 1
+
+We want to conduct a simulation study to compare the performance of the *Hoeffding/Chebyshev/Gaussian* Confidence Intervals with the "*Always Valid*" and the *Asymptotic* Confidence Sequences.
+In particular, given a sequence of IID observations $\{X_t\}_1^\infty$ from a 1-sub-Gaussian distribution with mean $\mu = E(X)$, we have a $(1- \alpha)$ CSs for $\mu$ valid "anytime":
+
+$$
+\frac{\sum_{i=1}^tX_i}{t} \pm 1.7 \cdot \sqrt \frac{log log(2t) + 0.72 \cdot log(\frac{10.4}{\alpha})}{t}
+$$
+
+and an Asymptotic $(1 - \alpha)$ CS for $\mu$: $$
+\frac{\sum_{i=1}^tX_i}{t} \pm \widehat{\sigma_t} \cdot 1.7 \cdot \sqrt \frac{log log(2t) + 0.72 \cdot log(\frac{10.4}{\alpha})}{t}
+$$
+
+where $\widehat{\sigma_t}$ denotes the sample variance based on the first $t$ observations.
+
+### Simulation setup
+
+Since we want to compare the performance of these sets with Hoeffding CIs we need populations with bounded random variables.
+They also need to be sub-Gaussian for the previous CS equations to be valid (sub-Gaussian random variables have a distribution whose tails decay to zero at least as fast as the tails of a Gaussian).
+
+Thus, we choose some populations that have characteristics useful for our study:
+
+-   Beta distribution with large values of $\alpha$ and $\beta$ since it exhibits many characteristics close to 1-sub-Gaussian behavior and it is bounded
+
+-   Gaussian distribution with $\sigma = 2$ truncated at $-4$ and $4$ (in order to have bounded random variables for the Hoeffding CI)
+
+-   Bernoulli distribution that is a subgaussian distribution and it is bounded
+
+```{r functions, include=FALSE}
+
+#' Cumulative mean
+cumul_mean <- function(x,
+                       regularizer_obs = 0,
+                       regularizer_mean = 1 / 2) {
+  t <- seq(1, length(x))
+  return((cumsum(x) + regularizer_obs * regularizer_mean) / (t + regularizer_obs))
+}
+
+#' Cumulative variance
+cumul_var <- function(x) {
+  t <- 1:length(x)
+  sigma2_t <- (cumul_mean(x^2) - cumul_mean(x)^2) * t / (t - 1)
+  
+  return(sigma2_t)
+}
+
+#' CLT margin
+clt_std_margin <- function(t, alpha) {
+  return(qnorm(1 - alpha/2) / sqrt(t))
+}
+
+#' Hoeffding margin
+hoeff_margin <- function(t, alpha, rang){
+  return(sqrt((rang/(2*t))*log(2/alpha)))
+}
+
+cheb_margin <- function(t, alpha){
+  return(1/sqrt(t*alpha))
+}
+
+
+#' Asympt Conf Sequence margin
+ACS_margin <- function(t, alpha = 0.05)
+{
+  stopifnot(all(t >= 1))
+  stopifnot(alpha > 0 && alpha < 1)
+  
+  return(1.7 *
+           sqrt(log(log(2 * t)) + 0.72 * log(10.4 / alpha)) /
+           sqrt(t))
+}
+
+#' CLT confidence intervals
+clt_confidence_intervals <- function(x,
+                                       alpha = 0.1,
+                                       var = NULL) {
+  
+  t <- seq(1, length(x))
+  mu_hat_t <- cumul_mean(x)
+  if (is.null(var)) {
+    var <- cumul_var(x)
+  }
+
+  std_margin <- clt_std_margin(t = t, alpha = alpha)
+  
+  margin <- sqrt(var) * std_margin
+  # When the margin is NA, such as on the first observation, just return
+  # infinity
+  margin[is.na(margin)] <- Inf
+  
+  return(list(
+    "l" = mu_hat_t - margin,
+    "u" = mu_hat_t + margin
+  ))
+}
+
+#' Hoeff conf intervals
+hoeff_confidence_intervals <- function(x,
+                                       alpha = 0.05,
+                                       var = NULL,
+                                       rang = 1) {
+  
+  t <- seq(1, length(x))
+  mu_hat_t <- cumul_mean(x)
+  if (is.null(var)) {
+    var <- cumul_var(x)
+  }
+  
+  margin <- hoeff_margin(t = t, alpha = alpha / 2, rang = rang)
+  
+  # When the margin is NA, such as on the first observation, just return
+  # infinity
+  margin[is.na(margin)] <- Inf
+  
+  return(list(
+    "l" = mu_hat_t - margin,
+    "u" = mu_hat_t + margin
+  ))
+}
+
+#' Hoeff conf intervals
+cheb_confidence_intervals <- function(x,
+                                       alpha = 0.05,
+                                       var = NULL,
+                                       rang = 1) {
+  
+  t <- seq(1, length(x))
+  mu_hat_t <- cumul_mean(x)
+  if (is.null(var)) {
+    var <- cumul_var(x)
+  }
+  
+  margin <- sqrt(var) * cheb_margin(t = t, alpha = alpha)
+  
+  # When the margin is NA, such as on the first observation, just return
+  # infinity
+  margin[is.na(margin)] <- Inf
+  
+  return(list(
+    "l" = mu_hat_t - margin,
+    "u" = mu_hat_t + margin
+  ))
+}
+
+
+#' Asymptotic confidence sequence
+asymptotic_confseq <- function(x,
+                               alpha = 0.05,
+                               var = NULL){
+  stopifnot(alpha > 0 && alpha < 1)
+  
+  
+  t = seq(1, length(x))
+  mu_hat_t = cumul_mean(x)
+  if (is.null(var)){
+    var <- cumul_var(x)
+  }
+  std_margin <- ACS_margin(t = t, alpha = alpha)
+  
+  margin <- sqrt(var) * std_margin
+  
+  # When the margin is NA, such as on the first observation, just return
+  # infinity
+  margin[is.na(margin)] = Inf
+  
+  return(list('l' = mu_hat_t - margin,
+              'u' = mu_hat_t + margin))
+}
+
+#' Always valid conf seq
+always_valid_confseq <- function(x,
+                               alpha = 0.05,
+                               var = NULL){
+  stopifnot(alpha > 0 && alpha < 1)
+  
+  
+  t = seq(1, length(x))
+  mu_hat_t = cumul_mean(x)
+  if (is.null(var)){
+    var <- cumul_var(x)
+  }
+  margin <- ACS_margin(t = t, alpha = alpha)
+  
+  # When the margin is NA, such as on the first observation, just return
+  # infinity
+  margin[is.na(margin)] = Inf
+  
+  return(list('l' = mu_hat_t - margin,
+              'u' = mu_hat_t + margin))
+}
+
+
+
+
+
+#' Get the cumulative empirical miscoverage rate of a confidence sequence
+get_cumul_miscoverage_rate <-
+  function(data_generator_fn,
+           conf_set_fn,
+           times,
+           num_repeats,
+           mu = 0) {
+    miscoverage_list <- mclapply(1:num_repeats, function(i) {
+      x <- data_generator_fn()
+      conf_sets <- conf_set_fn(x)
+      l <- conf_sets$l[times]
+      u <- conf_sets$u[times]
+      miscoverage <- cummax(l > mu | u < mu)
+      stopifnot(all(!is.na(miscoverage)))
+      
+      return(miscoverage)
+    }, mc.cores = 1)
+    
+    miscoverage_rate <- colMeans(do.call(rbind, miscoverage_list))
+    
+    return(miscoverage_rate)
+  }
+
+
+#' Get the empirical width of a confidence sequence
+get_avg_width <-
+  function(data_generator_fn,
+           conf_set_fn,
+           times,
+           num_repeats) {
+    width_list <- mclapply(1:num_repeats, function(i) {
+      x <- data_generator_fn()
+      conf_sets <- conf_set_fn(x)
+      l <- conf_sets$l[times]
+      u <- conf_sets$u[times]
+      width <- u - l
+      stopifnot(all(!is.na(width)))
+      
+      return(width)
+    }, mc.cores = 1)
+    
+    avg_width <- colMeans(do.call(rbind, width_list))
+    
+    return(avg_width)
+  }
+
+
+```
+
+We then fix the simulation size $M =1000$, define the significance level $\alpha= 0.1$, the minimum sample size $t_{min} = 100$ and the maximum sample size $t_{max} = 10000$.
+
+```{r params}
+M <- 1000
+alpha <- 0.1
+tmin <- 100
+tmax <- 10000
+```
+
+### Beta Population
+
+Let's start from the Beta population.
+We know the true mean of a $Beta(\alpha,\beta)$ is $\mu = \frac{\alpha}{\alpha + \beta}$.
+As parameters of the distribution we choose $\alpha = 5$ and $\beta = 7$.
+Thus, the true mean will be $\mu = \frac{5}{12}$.
+We first want to see for a single sequence of $\{X_1, ..., X_t\}$ the difference between the Confidence Intervals and the Confidence Sequences, thus we are going to compute and plot the Hoeffding and Gaussian CIs and the two Confidence Sequences.
+We are also going to plot the cumulative number of miscoverages using the different sets at every time from $t_{min}$ up to $t_{max}$.
+
+```{r simulation beta, fig.align='center', echo=FALSE, fig.width=12, fig.height=6}
+a1 <- 5
+b1 <- 7
+true_mean <- a1/(a1 + b1)
+tmax <- 10000
+
+
+compute_confidence_intervals <- function(tmin = tmin, tmax = tmax, a = alpha) {
+  # Generate truncated normal data
+  set.seed(2)
+  xx <- rbeta(tmax, a1, b1)
+  
+  # Initialize matrices
+  ci_n <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_aw <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_h <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_as <- matrix(NA, nrow = tmax, ncol = 2)
+  
+  # Initialize miscoverage vectors
+  miscoverage_n <- miscoverage_aw <- miscoverage_h <- miscoverage_as <- numeric(tmax - tmin + 1)
+  
+  # Calculate confidence intervals and miscoverage
+  for (t in seq(tmin, tmax)){
+    x <- xx[1:t]
+    
+    ci_norm <- c(mean(x) - qnorm(1 - a/2)*(sd(x)/sqrt(t)), mean(x) + qnorm(1 - a/2)*(sd(x)/sqrt(t)))
+    ci_n[t, ] <- ci_norm
+    
+    cs_aw <- c(mean(x) - 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t), mean(x) + 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t))
+    ci_aw[t, ] <- cs_aw
+    
+    ci_hoeff <- c(mean(x) - sqrt((1/(2*t))*log(2/a)), mean(x) + sqrt((1/(2*t))*log(2/a)))
+    ci_h[t, ] <- ci_hoeff
+    
+    cs_as <- c(mean(x) - sd(x) * 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t), mean(x) + sd(x) * 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t))
+    ci_as[t, ] <- cs_as
+    
+    miscoverage_n[t - tmin + 1] <- ifelse(ci_norm[1] <= true_mean && ci_norm[2] >= true_mean, 0, 1)
+    miscoverage_aw[t - tmin + 1] <- ifelse(cs_aw[1] <= true_mean && cs_aw[2] >= true_mean, 0, 1)
+    miscoverage_h[t - tmin + 1] <- ifelse(ci_hoeff[1] <= true_mean && ci_hoeff[2] >= true_mean, 0, 1)
+    miscoverage_as[t - tmin + 1] <- ifelse(cs_as[1] <= true_mean && cs_as[2] >= true_mean, 0, 1)
+  }
+  
+  # Combine results into a list
+  results <- list(
+    ci_n = ci_n,
+    ci_aw = ci_aw,
+    ci_h = ci_h,
+    ci_as = ci_as,
+    miscoverage_n = miscoverage_n,
+    miscoverage_aw = miscoverage_aw,
+    miscoverage_h = miscoverage_h,
+    miscoverage_as = miscoverage_as
+  )
+  
+  return(results)
+}
+
+
+results <- compute_confidence_intervals(tmin, tmax, alpha)
+results$ci_n <- results$ci_n[-seq(1, tmin - 1),]
+results$ci_aw <- results$ci_aw[-seq(1, tmin - 1),]
+results$ci_h <- results$ci_h[-seq(1, tmin - 1),]
+results$ci_as <- results$ci_as[-seq(1, tmin - 1),]
+
+
+par(mfrow=c(1, 2))
+
+plot(seq(tmin, tmax), results$ci_n[, 1], type = 'l', ylim = c(0.15, 0.65), xlab = 'Time', ylab = 'Confidence Sets', main = 'Confidence Sets for True Mean', col='magenta4', lty = 1, lwd = 2)
+lines(results$ci_n[, 2], col = 'magenta4', lty = 1, lwd = 2)
+lines(results$ci_aw[, 1], col = 'orange', lty = 1, lwd = 2)
+lines(results$ci_aw[, 2], col = 'orange', lty = 1, lwd = 2)
+lines(results$ci_h[, 1], col = 'lightgreen', lty = 1, lwd = 2)
+lines(results$ci_h[, 2], col = 'lightgreen', lty = 1, lwd = 2)
+lines(results$ci_as[, 1], col = 'lightslateblue', lty = 1, lwd = 2)
+lines(results$ci_as[, 2], col = 'lightslateblue', lty = 1, lwd = 2)
+abline(h = true_mean, col = 'black', lwd = 3, lty = 2)
+
+grid()
+
+legend('topright', legend = c('CLT CI', 'AlwVal CS', 'Hoeff CI', 'Asymp CS', 'True Mean'),
+       col = c('magenta4', 'orange', 'lightgreen', 'lightslateblue', 'black'),
+       lty = c(1, 1, 1, 1, 2), cex = 0.8)
+
+
+# Compute cumulative miscoverage number
+cumulative_miscoverage_n <- cumsum(results$miscoverage_n) / tmax
+cumulative_miscoverage_aw <- cumsum(results$miscoverage_aw) / tmax
+cumulative_miscoverage_h <- cumsum(results$miscoverage_h) / tmax
+cumulative_miscoverage_as <- cumsum(results$miscoverage_as) / tmax
+
+plot(seq(tmin, tmax), cumulative_miscoverage_n, type = 'l', col = 'magenta4',
+     xlab = 'Sample Size (t)', ylab = 'Cumulative Percentage of Miscoverages', main = 'Cumulative Miscoverages Rate (single experiment)', lwd = 2)
+lines(seq(tmin, tmax), cumulative_miscoverage_aw, col = 'orange', lwd = 2)
+lines(seq(tmin, tmax), cumulative_miscoverage_h, col = 'lightgreen', lwd = 2)
+lines(seq(tmin, tmax), cumulative_miscoverage_as, col = 'lightslateblue', lwd = 2)
+abline(h=alpha)
+
+grid()
+
+legend('topleft', legend = c('CLT CI',  'AlwVal CS', 'Hoeff CI', 'Asymp CS'), col = c('magenta4', 'orange', 'lightgreen', 'lightslateblue'), lty = 1)
+
+par(mfrow=c(1, 1))
+```
+
+Looking at the plot on the left, it is easy to notice that the Gaussian fixed time confidence intervals, which are the ones colored in magenta, miscover the true mean in multiple instances over time.
+On the other hand, the confidence sequences, the ones colored in blue and orange, simultaneously capture the true mean uniformly over time and asymptotically.
+
+In the plot on the right side it is shown the cumulative miscoverage rate for this example.
+As we can see, it quickly exceeds our target $\alpha$ level.
+Certainly, this is just a specific case and sometimes CI will capture the true mean even over time, but this plot already gives an hint on why we shouldn't use confidence intervals in sequential settings.
+Moreover, it is also interesting to see that the Asymptotic CS is quite tight, even tighter than Hoeffding CI, yet is able to always capture the true mean.
+
+Next, we are going to run a simulation to better understand the behavior and performance of fixed-time pointwise Confidence Intervals and time-uniform Confidence Sequences in sequential settings.
+The population will always be the Beta with the same parameters as before, but now we will sample from it and construct the sets $M=1000$ times.
+We are going to add the Chebyshev intervals too.
+
+```{r avg miscov beta, fig.align='center', echo=FALSE, fig.width=12, fig.height=6}
+
+n <- 10000
+tmin <- 100
+alpha <- 0.1
+mu <- 5/12
+
+data_generator_fn <- function() {
+  return(rbeta(n, a1, b1))
+}
+
+# Compute asymptotic conf seq
+acs_fn <- function(y) {
+  asymptotic_confseq(x = y, alpha = alpha)
+}
+
+# Compute normal ci
+clt_fn <- function(y) {
+    clt_confidence_intervals(x = y, alpha = alpha)
+  }
+
+#' Compute hoeff ci
+hoeff_fn <- function(y){
+  hoeff_confidence_intervals(x = y, alpha = alpha, rang = 1)
+}
+
+avcs_fn <- function(y) {
+  always_valid_confseq(x = y, alpha = alpha)
+}
+
+cheb_fn <- function(y){
+  cheb_confidence_intervals(x = y, alpha = alpha)
+}
+
+
+# Get ACS miscoverage
+acs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+avcs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+clt_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+cheb_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+hoeff_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+acs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+clt_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+hoeff_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+avcs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+cheb_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+par(mfrow=c(1, 2))
+
+#Plot MIscoverage rates
+plot(seq(tmin, n), clt_miscoverage, type = 'l', ylim = c(0, 1),
+     col = "indianred", xlab = "Time", ylab = "Cumulative Miscoverage Rate", main = "Cumulative Miscoverage Rates", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_miscoverage, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), avcs_miscoverage, lty = 1, col = "orange", lwd = 2)
+lines(seq(tmin, n), hoeff_miscoverage, lty = 2, col ='lightgreen', lwd = 2)
+lines(seq(tmin, n), cheb_miscoverage, lty = 2, col ='blue3', lwd = 2)
+abline(h=alpha, lwd = 2, lty = 3)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", "Cheby CI", "AlwVal CS", paste("Alpha =", alpha)),
+       col = c("indianred", "lightslateblue", "lightgreen", "blue3", "orange", "black"), lty = c(2, 1, 2, 2, 2, 3), cex = 0.8)
+
+
+# Plot Running Interval Lenght
+plot(seq(tmin, n), clt_width, type = 'l', ylim = c(0, 0.5),
+     col = "indianred", xlab = "Time", ylab = "Length", main = "Running Interval Lenghts", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_width, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), hoeff_width, lty = 2, col ='lightgreen', lwd = 2)
+lines(seq(tmin, n), cheb_width, lty = 2, col ='blue3', lwd = 2)
+lines(seq(tmin, n), avcs_width, lty = 1, col = "orange", lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", "Cheby CI", "AlwVal CS"), 
+       col = c("indianred", "lightslateblue", "lightgreen", "blue3", "orange"), lty = c(2, 1, 2, 2, 1), cex = 0.8)
+
+par(mfrow=c(1, 1))
+
+
+```
+
+The left plot has on the vertical axis the cumulative miscoverage rate and on the horizontal axis the time.
+If we take a certain $x$ value, this plot tells us the empirical probability (given by having $M$ resamples) that at any time before this (included) the intervals did miscover.
+We can notice that the Gaussian CI exceeds the $(\alpha \cdot 100) \%$ threshold, in our case $10\%$, when used in a sequential fashion very quickly.
+Moreover, they are asymptotic confidence intervals, thus it is expected that when the sample size is still relatively small they miscover with high probability.
+The Asymptotic CS instead works well overall and remains under the $\alpha$ threshold we set.
+
+On the right hand side, there is a plot showing the Average Running Intervals Length.
+As we expected they get smaller as the samples get bigger.
+As before we can see that the Gaussian interval is the smallest, while the Asymptotic Confidence Sequence is slightly bigger yet ensures extremely better performance.
+
+#### **Increasing** $t_{min}$
+
+Now we would like to test what would happen if we just waited a little bit more and started sampling later, when we have more data available.
+We are, thus, going to set $t_{min} = 500$.
+
+```{r avg miscov beta tmin500, fig.align='center', echo=FALSE, fig.width=12, fig.height=6}
+
+n <- 10000
+tmin <- 500
+alpha <- 0.1
+mu <- 5/12
+
+ddata_generator_fn <- function() {
+  return(rbeta(n, a1, b1))
+}
+
+# Compute asymptotic conf seq
+acs_fn <- function(y) {
+  asymptotic_confseq(x = y, alpha = alpha)
+}
+
+# Compute normal ci
+clt_fn <- function(y) {
+    clt_confidence_intervals(x = y, alpha = alpha)
+  }
+
+#' Compute hoeff ci
+hoeff_fn <- function(y){
+  hoeff_confidence_intervals(x = y, alpha = alpha, rang = 1)
+}
+
+avcs_fn <- function(y) {
+  always_valid_confseq(x = y, alpha = alpha)
+}
+
+cheb_fn <- function(y){
+  cheb_confidence_intervals(x = y, alpha = alpha)
+}
+
+
+# Get ACS miscoverage
+acs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+avcs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+clt_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+cheb_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+hoeff_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+acs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+clt_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+hoeff_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+avcs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+cheb_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+par(mfrow=c(1, 2))
+
+#Plot MIscoverage rates
+plot(seq(tmin, n), clt_miscoverage, type = 'l', ylim = c(0, 0.9),
+     col = "indianred", xlab = "Time", ylab = "Cumulative Miscoverage Rate", main = "Cumulative Miscoverage Rates", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_miscoverage, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), avcs_miscoverage, lty = 1, col = "orange", lwd = 2)
+lines(seq(tmin, n), hoeff_miscoverage, lty = 2, col ='lightgreen', lwd = 2)
+lines(seq(tmin, n), cheb_miscoverage, lty = 2, col ='blue3', lwd = 2)
+abline(h=alpha, lty = 3, lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", "Cheby CI", "AlwVal CS", paste("Alpha =", alpha)),
+       col = c("indianred", "lightslateblue", "lightgreen", "blue3", "orange", "black"), lty = c(2, 1, 2, 2, 1, 3), cex = 0.8)
+
+# Plot Running Interval Lenght
+plot(seq(tmin, n), clt_width, type = 'l', ylim = c(0, 0.4),
+     col = "indianred", xlab = "Time", ylab = "Length", main = "Running Interval Lenghts", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_width, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), hoeff_width, lty = 2, col ='lightgreen', lwd = 2)
+lines(seq(tmin, n), cheb_width, lty = 2, col ='blue3', lwd = 2)
+lines(seq(tmin, n), avcs_width, lty = 1, col = "orange", lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", "Cheby CI", "AlwVal CS"), 
+       col = c("indianred", "lightslateblue", "lightgreen", "blue3", "orange"), lty = c(2, 1, 2, 2, 1), cex = 0.8)
+
+par(mfrow=c(1, 1))
+
+
+```
+
+As expected the CMR increases less steeply as we now get less miscoverages at the beginning of our experiment.
+
+#### **Changing** $\alpha$
+
+We are also interested in seeing how these intervals vary as we decrease the significance level $\alpha$, so we are going to run the simulation again but using a significance level of $0.01$.
+
+```{r simulation beta alphsmall, fig.align='center', echo=FALSE, fig.width=12, fig.height=6}
+a1 <- 5
+b1 <- 7
+true_mean <- a1/(a1 + b1)
+alpha <- 0.01
+tmin <- 100
+
+
+compute_confidence_intervals <- function(tmin = tmin, tmax = tmax, a = alpha) {
+  # Generate truncated normal data
+  set.seed(3)
+  xx <- rbeta(tmax, a1, b1)
+  
+  # Initialize matrices
+  ci_n <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_aw <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_h <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_as <- matrix(NA, nrow = tmax, ncol = 2)
+  
+  # Initialize miscoverage vectors
+  miscoverage_n <- miscoverage_aw <- miscoverage_h <- miscoverage_as <- numeric(tmax - tmin + 1)
+  
+  # Calculate confidence intervals and miscoverage
+  for (t in seq(tmin, tmax)){
+    x <- xx[1:t]
+    
+    ci_norm <- c(mean(x) - qnorm(1 - a/2)*(sd(x)/sqrt(t)), mean(x) + qnorm(1 - a/2)*(sd(x)/sqrt(t)))
+    ci_n[t, ] <- ci_norm
+    
+    cs_aw <- c(mean(x) - 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t), mean(x) + 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t))
+    ci_aw[t, ] <- cs_aw
+    
+    ci_hoeff <- c(mean(x) - sqrt((1/(2*t))*log(2/a)), mean(x) + sqrt((1/(2*t))*log(2/a)))
+    ci_h[t, ] <- ci_hoeff
+    
+    cs_as <- c(mean(x) - sd(x) * 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t), mean(x) + sd(x) * 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t))
+    ci_as[t, ] <- cs_as
+    
+    miscoverage_n[t - tmin + 1] <- ifelse(ci_norm[1] <= true_mean && ci_norm[2] >= true_mean, 0, 1)
+    miscoverage_aw[t - tmin + 1] <- ifelse(cs_aw[1] <= true_mean && cs_aw[2] >= true_mean, 0, 1)
+    miscoverage_h[t - tmin + 1] <- ifelse(ci_hoeff[1] <= true_mean && ci_hoeff[2] >= true_mean, 0, 1)
+    miscoverage_as[t - tmin + 1] <- ifelse(cs_as[1] <= true_mean && cs_as[2] >= true_mean, 0, 1)
+  }
+  
+  # Combine results into a list
+  results <- list(
+    ci_n = ci_n,
+    ci_aw = ci_aw,
+    ci_h = ci_h,
+    ci_as = ci_as,
+    miscoverage_n = miscoverage_n,
+    miscoverage_aw = miscoverage_aw,
+    miscoverage_h = miscoverage_h,
+    miscoverage_as = miscoverage_as
+  )
+  
+  return(results)
+}
+
+
+results <- compute_confidence_intervals(tmin, tmax, alpha)
+results$ci_n <- results$ci_n[-seq(1, tmin - 1),]
+results$ci_aw <- results$ci_aw[-seq(1, tmin - 1),]
+results$ci_h <- results$ci_h[-seq(1, tmin - 1),]
+results$ci_as <- results$ci_as[-seq(1, tmin - 1),]
+
+
+par(mfrow=c(1, 2))
+
+plot(seq(tmin, tmax), results$ci_n[, 1], type = 'l', ylim = c(0.15, 0.65), xlab = 'Time', ylab = 'Confidence Sets', main = 'Confidence Sets for True Mean', col='magenta4', lty = 1, lwd = 2)
+lines(results$ci_n[, 2], col = 'magenta4', lty = 1, lwd = 2)
+lines(results$ci_aw[, 1], col = 'orange', lty = 1, lwd = 2)
+lines(results$ci_aw[, 2], col = 'orange', lty = 1, lwd = 2)
+lines(results$ci_h[, 1], col = 'lightgreen', lty = 1, lwd = 2)
+lines(results$ci_h[, 2], col = 'lightgreen', lty = 1, lwd = 2)
+lines(results$ci_as[, 1], col = 'lightslateblue', lty = 1, lwd = 2)
+lines(results$ci_as[, 2], col = 'lightslateblue', lty = 1, lwd = 2)
+abline(h = true_mean, col = 'black', lwd = 3, lty = 2)
+grid()
+
+legend('topright', legend = c('CLT CI', 'AlwVal CS', 'Hoeff CI', 'Asymp CS', 'True Mean'),
+       col = c('magenta4', 'orange', 'lightgreen', 'lightslateblue', 'black'),
+       lty = c(1, 1, 1, 1, 2), cex = 0.8)
+
+
+# Compute cumulative miscoverage number
+cumulative_miscoverage_n <- cumsum(results$miscoverage_n) 
+cumulative_miscoverage_aw <- cumsum(results$miscoverage_aw)
+cumulative_miscoverage_h <- cumsum(results$miscoverage_h) 
+cumulative_miscoverage_as <- cumsum(results$miscoverage_as) 
+
+plot(seq(tmin, tmax), cumulative_miscoverage_n, type = 'l', col = 'magenta4',
+     xlab = 'Sample Size (t)', ylab = 'Cumulative Number of Miscoverages', main = 'Cumulative Miscoverage Rate (single experiment)', ylim = c(0, 1), lwd = 2)
+lines(seq(tmin, tmax), cumulative_miscoverage_aw, col = 'lightslateblue', lwd = 2)
+lines(seq(tmin, tmax), cumulative_miscoverage_h, col = 'lightgreen', lwd =2)
+lines(seq(tmin, tmax), cumulative_miscoverage_as, col = 'orange', lwd = 2)
+abline(h=alpha)
+grid()
+legend('topleft', legend = c('CLT CI', 'AlwVal CS', 'Hoeff CS', 'Asymp CS'), col = c('magenta4', 'lightslateblue', 'lightgreen', 'orange'), lty = 1)
+
+par(mfrow=c(1, 1))
+```
+
+```{r avg miscov beta alphsmall, fig.align='center', echo=FALSE, fig.width=12, fig.height=6}
+
+n <- 10000
+tmin <- 100
+alpha <- 0.01
+mu <- 5/12
+
+data_generator_fn <- function() {
+  return(rbeta(n, a1, b1))
+}
+
+# Compute asymptotic conf seq
+acs_fn <- function(y) {
+  asymptotic_confseq(x = y, alpha = alpha)
+}
+
+# Compute normal ci
+clt_fn <- function(y) {
+    clt_confidence_intervals(x = y, alpha = alpha)
+  }
+
+#' Compute hoeff ci
+hoeff_fn <- function(y){
+  hoeff_confidence_intervals(x = y, alpha = alpha, rang = 1)
+}
+
+avcs_fn <- function(y) {
+  always_valid_confseq(x = y, alpha = alpha)
+}
+
+cheb_fn <- function(y){
+  cheb_confidence_intervals(x = y, alpha = alpha)
+}
+
+
+# Get ACS miscoverage
+acs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+avcs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+clt_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+cheb_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+hoeff_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+acs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+clt_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+hoeff_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+avcs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+cheb_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+par(mfrow=c(1, 2))
+
+#Plot MIscoverage rates
+plot(seq(tmin, n), clt_miscoverage, type = 'l', ylim = c(0, 0.25),
+     col = "indianred", xlab = "Time", ylab = "Cumulative Miscoverage Rate", main = "Cumulative Miscoverage Rates", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_miscoverage, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), avcs_miscoverage, lty = 1, col = "orange", lwd = 2)
+lines(seq(tmin, n), hoeff_miscoverage, lty = 2, col ='lightgreen', lwd = 2)
+lines(seq(tmin, n), cheb_miscoverage, lty = 2, col ='blue3', lwd = 2)
+abline(h=alpha, lty = 3, lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", "Cheby CI", "AlwVal CS", paste("Alpha =", alpha)),
+       col = c("indianred", "lightslateblue", "lightgreen", "blue3", "orange", "black"), lty = c(2, 1, 2, 2, 2, 3), cex = 0.8)
+
+# Plot Running Interval Lenght
+plot(seq(tmin, n), clt_width, type = 'l', ylim = c(0, 0.5),
+     col = "indianred", xlab = "Time", ylab = "Length", main = "Running Interval Lenghts", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_width, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), hoeff_width, lty = 2, col ='lightgreen', lwd = 2)
+lines(seq(tmin, n), cheb_width, lty = 2, col ='blue3', lwd = 2)
+lines(seq(tmin, n), avcs_width, lty = 1, col = "orange", lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", "Cheby CI", "AlwVal CS"), 
+       col = c("indianred", "lightslateblue", "lightgreen", "blue3", "orange"), lty = c(2, 1, 2, 2, 1), cex = 0.8)
+
+par(mfrow=c(1, 1))
+
+
+
+```
+
+As we would expect the width of the confidence intervals and sequences is now bigger for a given $x$, yet the cumulative miscoverage rate quickly diverges beyond $\alpha = 0.01$ in the case of Gaussian CIs.
+
+### Normal Population
+
+Now we will sample from a different population.
+In particular, we are going to sample from a truncated Gaussian.
+We are interested in a examining how these intervals behave under populations that exhibit higher variance, therefore we are going to set $\sigma = 2$.
+The true mean will be $\mu = 0$ and the support of our population will be $[-4, 4]$.
+
+Before running the simulation, as before, we want to examine, for a single run, the confidence sets' behavior.
+
+```{r plot sets normal, fig.align='center', echo=FALSE, fig.width=12, fig.height=6}
+tmin <- 100
+tmax <- 10000
+sigma <- 2
+lb <- -4
+ub <- 4
+alpha <- 0.1
+true_mean <- 0
+
+compute_confidence_intervals <- function(tmin = tmin, tmax = tmax, a = alpha) {
+  # Generate truncated normal data
+  set.seed(2)
+  xx <- rtruncnorm(tmax, lb, ub, 0, sigma)
+  
+  # Initialize matrices
+  ci_n <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_aw <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_h <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_as <- matrix(NA, nrow = tmax, ncol = 2)
+  
+  # Initialize miscoverage vectors
+  miscoverage_n <- miscoverage_aw <- miscoverage_h <- miscoverage_as <- numeric(tmax - tmin + 1)
+  
+  # Calculate confidence intervals and miscoverage
+  for (t in seq(tmin, tmax)){
+    x <- xx[1:t]
+    
+    ci_norm <- c(mean(x) - qnorm(1 - a/2)*(sd(x)/sqrt(t)), mean(x) + qnorm(1 - a/2)*(sd(x)/sqrt(t)))
+    ci_n[t, ] <- ci_norm
+    
+    cs_aw <- c(mean(x) - 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t), mean(x) + 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t))
+    ci_aw[t, ] <- cs_aw
+    
+    ci_hoeff <- c(mean(x) - sqrt(((ub - lb)/(2*t))*log(2/a)), mean(x) + sqrt(((ub-lb)/(2*t))*log(2/a)))
+    ci_h[t, ] <- ci_hoeff
+    
+    cs_as <- c(mean(x) - sd(x) * 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t), mean(x) + sd(x) * 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t))
+    ci_as[t, ] <- cs_as
+    
+    miscoverage_n[t - tmin + 1] <- ifelse(ci_norm[1] <= true_mean && ci_norm[2] >= true_mean, 0, 1)
+    miscoverage_aw[t - tmin + 1] <- ifelse(cs_aw[1] <= true_mean && cs_aw[2] >= true_mean, 0, 1)
+    miscoverage_h[t - tmin + 1] <- ifelse(ci_hoeff[1] <= true_mean && ci_hoeff[2] >= true_mean, 0, 1)
+    miscoverage_as[t - tmin + 1] <- ifelse(cs_as[1] <= true_mean && cs_as[2] >= true_mean, 0, 1)
+  }
+  
+  # Combine results into a list
+  results <- list(
+    ci_n = ci_n,
+    ci_aw = ci_aw,
+    ci_h = ci_h,
+    ci_as = ci_as,
+    miscoverage_n = miscoverage_n,
+    miscoverage_aw = miscoverage_aw,
+    miscoverage_h = miscoverage_h,
+    miscoverage_as = miscoverage_as
+  )
+  
+  return(results)
+}
+
+
+results <- compute_confidence_intervals(tmin, tmax, alpha)
+results$ci_n <- results$ci_n[-seq(1, tmin - 1),]
+results$ci_aw <- results$ci_aw[-seq(1, tmin - 1),]
+results$ci_h <- results$ci_h[-seq(1, tmin - 1),]
+results$ci_as <- results$ci_as[-seq(1, tmin - 1),]
+
+par(mfrow=c(1, 2))
+
+plot(seq(tmin, tmax), results$ci_n[, 1], type = 'l', ylim=c(-0.5, 0.5), xlab = 'Time', ylab = 'Confidence Sets', main = 'Confidence Sets for True Mean', col='magenta4', lty = 1, lwd = 2)
+lines(results$ci_n[, 2], col = 'magenta4', lty = 1, lwd = 2)
+lines(results$ci_aw[, 1], col = 'lightslateblue', lty = 1, lwd = 2)
+lines(results$ci_aw[, 2], col = 'lightslateblue', lty = 1, lwd = 2)
+lines(results$ci_h[, 1], col = 'lightgreen', lty = 1, lwd = 2)
+lines(results$ci_h[, 2], col = 'lightgreen', lty = 1, lwd = 2)
+lines(results$ci_as[, 1], col = 'orange', lty = 1, lwd = 2)
+lines(results$ci_as[, 2], col = 'orange', lty = 1, lwd = 2)
+
+
+abline(h = true_mean, col = 'black', lwd = 3, lty=2)
+grid()
+
+legend('topright', legend = c('CLT CI', 'AlwVal CS', 'Hoeff CI', 'Asymp CS', 'True Mean'),
+       col = c('magenta4', 'lightslateblue', 'lightgreen', 'orange', 'black'), lty = c(1, 1, 1, 1, 2), cex = 0.8)
+
+
+# Compute cumulative miscoverage 
+cumulative_miscoverage_n <- cumsum(results$miscoverage_n) / (tmax - tmin)
+cumulative_miscoverage_aw <- cumsum(results$miscoverage_aw)  / (tmax - tmin)
+cumulative_miscoverage_h <- cumsum(results$miscoverage_h) / (tmax - tmin)
+cumulative_miscoverage_as <- cumsum(results$miscoverage_as) / (tmax - tmin)
+
+plot(seq(tmin, tmax), cumulative_miscoverage_n, type = 'l', col = 'magenta4',
+     xlab = 'Sample Size (t)', ylab = 'Cumulative Number of Miscoverages', main = 'Cumulative Miscoverage Rate (single experiment)', lwd = 2)
+lines(seq(tmin, tmax), cumulative_miscoverage_aw, col = 'lightslateblue', lwd =2)
+lines(seq(tmin, tmax), cumulative_miscoverage_h, col = 'lightgreen', lwd = 2)
+lines(seq(tmin, tmax), cumulative_miscoverage_as, col = 'orange', lwd = 2)
+abline(h=alpha, lty = 2, lwd = 2)
+grid()
+
+legend('topleft', legend = c('CLT CI', 'AlwVal CS', 'Hoeff CI', 'Asymp CS '), col = c('magenta4', 'lightslateblue', 'lightgreen', 'orange'), lty = 1)
+
+par(mfrow=c(1, 1))
+```
+
+From the plot on the left, we notice how all the sets and in particular the Asymptotic confidence sequences grew bigger to compensate for the increased variance of the population.
+We can also notice that, as the size of the samples increases, the intervals get smaller and exclude the true mean at several points in time.
+
+Looking at the plot on the right, we see that the cumulative miscoverage of the point-wise time uniform CI quickly diverges away from the desired significance level.
+Even the Hoeffding CI failed this time.
+On the other hand, the CMR of the Confidence Sequences remains under the selected $\alpha$ value.
+In particular from this plot we appreciate the CMR of the Always Valid CS initally rises but then plateaus safely below $0.1$.
+
+Next we run a simulation to understand the Average Cumulative Miscoverage Rate for all the sets.
+
+```{r avg miscov norm, fig.align='center', echo=FALSE, fig.width=12, fig.height=6}
+
+n <- 10000
+tmin <- 100
+alpha <- 0.1
+mu <- 0
+
+
+data_generator_fn <- function() {
+  return(rtruncnorm(n, lb, ub, true_mean, sigma))
+}
+
+# Compute asymptotic conf seq
+acs_fn <- function(y) {
+  asymptotic_confseq(x = y, alpha = alpha)
+}
+
+# Compute normal ci
+clt_fn <- function(y) {
+    clt_confidence_intervals(x = y, alpha = alpha)
+  }
+
+#' Compute hoeff ci
+hoeff_fn <- function(y){
+  hoeff_confidence_intervals(x = y, alpha = alpha, rang = (ub - lb))
+}
+
+avcs_fn <- function(y) {
+  always_valid_confseq(x = y, alpha = alpha)
+}
+
+cheb_fn <- function(y){
+  cheb_confidence_intervals(x = y, alpha = alpha)
+}
+
+
+# Get ACS miscoverage
+acs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+avcs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+clt_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+cheb_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+hoeff_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+acs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+clt_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+hoeff_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+avcs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+cheb_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+par(mfrow=c(1, 2))
+
+#Plot MIscoverage rates
+plot(seq(tmin, n), clt_miscoverage, type = 'l', ylim = c(0, 1),
+     col = "indianred", xlab = "Time", ylab = "Cumulative Miscoverage Rate", main = "Cumulative Miscoverage Rates", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_miscoverage, lty = 1, col = "lightslateblue", lwd = 2)
+#lines(seq(tmin, n), avcs_miscoverage, lty = 1, col = "orange", lwd = 2)
+lines(seq(tmin, n), hoeff_miscoverage, lty = 2, col ='lightgreen', lwd = 2)
+#lines(seq(tmin, n), cheb_miscoverage, lty = 2, col ='blue3', lwd = 2)
+abline(h=alpha, lty = 3, lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", paste("Alpha =", alpha)),
+       col = c("indianred", "lightslateblue", "lightgreen", "black"), lty = c(2, 1, 2, 3), cex = 0.8)
+
+# Plot Running Interval Lenght
+plot(seq(tmin, n), clt_width, type = 'l', ylim = c(0, 0.5),
+     col = "indianred", xlab = "Time", ylab = "Length", main = "Running Interval Lenghts", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_width, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), hoeff_width, lty = 2, col ='lightgreen', lwd = 2)
+#lines(seq(tmin, n), cheb_width, lty = 2, col ='blue3', lwd = 2)
+#lines(seq(tmin, n), avcs_width, lty = 1, col = "orange", lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI"), 
+       col = c("indianred", "lightslateblue", "lightgreen"), lty = c(2, 1, 2), cex = 0.8)
+
+par(mfrow=c(1, 1))
+
+
+
+```
+
+Again we can notice that the CLT CI exceeds the $(\alpha \cdot 100) \%$ threshold when used in a sequential way incredibly quickly.
+It is also clear that even the Hoeffding interval will fail multiple times when applied in sequence to a population with higher variance.
+Indeed, the probability for the Hoeffding CI of failing to capture the true $\mu$ at any time up to, for example, $2000$ when applied sequentially is around $20\%$, while for the CLT CI is $60\%$.
+For the Asymptotic CS, instead it is very low (close to $0\%$).
+
+As before we will now increase the $t_{min}$, the size of the first sample / the first time we look at the collected data, and compute the Confidence Intervals and Sequences.
+The new value will be $t_{min}=500$.
+
+#### **Increasing** $t_{min}$
+
+```{r avg miscov norm tmin500, fig.align='center', echo=FALSE, fig.width=12, fig.height=6}
+tmin <- 500
+n <- 10000
+alpha <- 0.1
+mu <- 0
+
+
+data_generator_fn <- function() {
+  return(rtruncnorm(n, lb, ub, true_mean, sigma))
+}
+
+# Compute asymptotic conf seq
+acs_fn <- function(y) {
+  asymptotic_confseq(x = y, alpha = alpha)
+}
+
+# Compute normal ci
+clt_fn <- function(y) {
+    clt_confidence_intervals(x = y, alpha = alpha)
+  }
+
+#' Compute hoeff ci
+hoeff_fn <- function(y){
+  hoeff_confidence_intervals(x = y, alpha = alpha, rang = (ub - lb))
+}
+
+avcs_fn <- function(y) {
+  always_valid_confseq(x = y, alpha = alpha)
+}
+
+cheb_fn <- function(y){
+  cheb_confidence_intervals(x = y, alpha = alpha)
+}
+
+
+# Get ACS miscoverage
+acs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+avcs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+clt_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+cheb_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+hoeff_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+acs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+clt_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+hoeff_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+avcs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+cheb_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+par(mfrow=c(1, 2))
+
+#Plot MIscoverage rates
+plot(seq(tmin, n), clt_miscoverage, type = 'l', ylim = c(0, 0.9),
+     col = "indianred", xlab = "Time", ylab = "Cumulative Miscoverage Rate", main = "Cumulative Miscoverage Rates", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_miscoverage, lty = 1, col = "lightslateblue", lwd = 2)
+#lines(seq(tmin, n), avcs_miscoverage, lty = 1, col = "orange", lwd = 2)
+lines(seq(tmin, n), hoeff_miscoverage, lty = 2, col ='lightgreen', lwd = 2)
+#lines(seq(tmin, n), cheb_miscoverage, lty = 2, col ='blue3', lwd = 2)
+abline(h=alpha, lty = 3, lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", paste("Alpha =", alpha)),
+       col = c("indianred", "lightslateblue", "lightgreen", "black"), lty = c(2, 1, 2, 3), cex = 0.8)
+
+# Plot Running Interval Lenght
+plot(seq(tmin, n), clt_width, type = 'l', ylim = c(0, 0.5),
+     col = "indianred", xlab = "Time", ylab = "Length", main = "Running Interval Lenghts", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_width, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), hoeff_width, lty = 2, col ='lightgreen', lwd = 2)
+#lines(seq(tmin, n), cheb_width, lty = 2, col ='blue3', lwd = 2)
+#lines(seq(tmin, n), avcs_width, lty = 1, col = "orange", lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff C I"), 
+       col = c("indianred", "lightslateblue", "lightgreen"), lty = c(2, 1, 2, 2), cex = 0.8)
+
+par(mfrow=c(1, 1))
+
+```
+
+We notice that if we start computing the sets when we have more samples, then the CMR will be significantly lower as most of the miscoverages happen when the sample sizes are relatively small.
+
+### Bernoulli Population
+
+Finally, we are going to use the Bernoulli distribution, a discrete probability distribution.
+It is interesting for us since it has finite variance and it is subgaussian as $$
+E[e^{Xt}] = pe^{t} + (1 -p)e^0 \leq e^{\frac{t^2}{2}}
+$$
+
+Moreover the Bernoulli distribution can be very useful in behavioral studies and binary events modeling, thus coming in handy for an experiment like the one required in *Part 2*.
+
+```{r simulation bern, fig.align='center', echo=FALSE, fig.height=6, fig.width=12}
+alpha <- 0.1
+true_mean <- 0.5
+tmin <- 100
+lb <- 0
+ub <- 1
+
+
+compute_confidence_intervals <- function(tmin = tmin, tmax = tmax, a = alpha) {
+  # Generate truncated normal data
+  set.seed(3)
+  #sample(c(-1, 1), size = tmax, replace = TRUE)
+  xx <- rbinom(tmax, 1, 0.5)
+  
+  # Initialize matrices
+  ci_n <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_aw <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_c <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_as <- matrix(NA, nrow = tmax, ncol = 2)
+  ci_h <- matrix(NA, nrow = tmax, ncol = 2)
+  
+  # Initialize miscoverage vectors
+  miscoverage_n <- miscoverage_aw  <- miscoverage_h <- miscoverage_c <- miscoverage_as <- numeric(tmax - tmin + 1)
+  
+  # Calculate confidence intervals and miscoverage
+  for (t in seq(tmin, tmax)){
+    x <- xx[1:t]
+    
+    ci_norm <- c(mean(x) - qnorm(1 - a/2)*(sd(x)/sqrt(t)), mean(x) + qnorm(1 - a/2)*(sd(x)/sqrt(t)))
+    ci_n[t, ] <- ci_norm
+    
+    cs_aw <- c(mean(x) - 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t), mean(x) + 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t))
+    ci_aw[t, ] <- cs_aw
+    
+    ci_hoeff <- c(mean(x) - sqrt(((ub - lb)/(2*t))*log(2/a)), mean(x) + sqrt(((ub-lb)/(2*t))*log(2/a)))
+    ci_h[t, ] <- ci_hoeff
+    
+    ci_cheb <- c(mean(x) - (sd(x)/sqrt(t*a)), mean(x) + (sd(x)/sqrt(t*a)))
+    ci_c[t, ] <- ci_cheb
+    
+    cs_as <- c(mean(x) - sd(x) * 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t), mean(x) + sd(x) * 1.7 * sqrt((log(log(2*t)) + 0.72 * log(10.4/a)) / t))
+    ci_as[t, ] <- cs_as
+    
+    miscoverage_n[t - tmin + 1] <- ifelse(ci_norm[1] <= true_mean && ci_norm[2] >= true_mean, 0, 1)
+    miscoverage_aw[t - tmin + 1] <- ifelse(cs_aw[1] <= true_mean && cs_aw[2] >= true_mean, 0, 1)
+    miscoverage_c[t - tmin + 1] <- ifelse(ci_cheb[1] <= true_mean && ci_cheb[2] >= true_mean, 0, 1)
+    miscoverage_as[t - tmin + 1] <- ifelse(cs_as[1] <= true_mean && cs_as[2] >= true_mean, 0, 1)
+    miscoverage_h[t - tmin + 1] <- ifelse(ci_hoeff[1] <= true_mean && ci_hoeff[2] >= true_mean, 0, 1)
+  }
+  
+  # Combine results into a list
+  results <- list(
+    ci_n = ci_n,
+    ci_aw = ci_aw,
+    ci_c = ci_c,
+    ci_as = ci_as,
+    ci_h = ci_h,
+    miscoverage_n = miscoverage_n,
+    miscoverage_aw = miscoverage_aw,
+    miscoverage_c = miscoverage_c,
+    miscoverage_as = miscoverage_as,
+    miscoverage_h = miscoverage_h
+  )
+  
+  return(results)
+}
+
+
+results <- compute_confidence_intervals(tmin, tmax, alpha)
+results$ci_n <- results$ci_n[-seq(1, tmin - 1),]
+results$ci_aw <- results$ci_aw[-seq(1, tmin - 1),]
+results$ci_c <- results$ci_c[-seq(1, tmin - 1),]
+results$ci_as <- results$ci_as[-seq(1, tmin - 1),]
+results$ci_h <- results$ci_h[-seq(1, tmin - 1),]
+
+par(mfrow=c(1, 2))
+
+plot(seq(tmin, tmax), results$ci_n[, 1], type = 'l', ylim=c(0.25, 0.75), xlab = 'Time', ylab = 'Confidence Sets', main = 'Confidence Sets for True Mean', col='magenta4', lty = 1, lwd = 2)
+lines(results$ci_n[, 2], col = 'magenta4', lty = 1, lwd = 2)
+lines(results$ci_aw[, 1], col = 'orange', lty = 1, lwd = 2)
+lines(results$ci_aw[, 2], col = 'orange', lty = 1, lwd = 2)
+lines(results$ci_c[, 1], col = 'blue3', lty = 1, lwd = 2)
+lines(results$ci_c[, 2], col = 'blue3', lty = 1, lwd = 2)
+lines(results$ci_as[, 1], col = 'lightslateblue', lty = 1, lwd = 2)
+lines(results$ci_as[, 2], col = 'lightslateblue', lty = 1, lwd = 2)
+lines(results$ci_h[, 1], col = 'lightgreen', lty = 1, lwd = 2)
+lines(results$ci_h[, 2], col = 'lightgreen', lty = 1, lwd = 2)
+grid()
+
+abline(h = true_mean, col = 'black', lwd = 3, lty=2)
+
+legend('topright', legend = c('CLT CI', 'AlwVal CS', 'Hoeff CI', 'Asymp CS', 'Cheby CI', 'True Mean'),
+       col = c('magenta4', 'orange', 'lightgreen', 'lightslateblue', 'blue3', 'black'), lty = c(1,1,1,1,1, 2), cex = 0.8)
+
+
+# Compute cumulative miscoverage 
+cumulative_miscoverage_n <- cumsum(results$miscoverage_n) / (tmax - tmin)
+cumulative_miscoverage_aw <- cumsum(results$miscoverage_aw)  / (tmax - tmin)
+cumulative_miscoverage_c <- cumsum(results$miscoverage_c) / (tmax - tmin)
+cumulative_miscoverage_as <- cumsum(results$miscoverage_as) / (tmax - tmin)
+cumulative_miscoverage_h <- cumsum(results$miscoverage_h) / (tmax - tmin)
+
+plot(seq(tmin, tmax), cumulative_miscoverage_n, type = 'l', col = 'magenta4',
+     xlab = 'Sample Size (t)', ylab = 'Cumulative Percentage of Miscoverages', main = 'Cumulative Miscoverage Rate (single experiment)', lwd = 2, ylim = c(0, 0.4))
+lines(seq(tmin, tmax), cumulative_miscoverage_aw, col = 'orange', lwd =2)
+lines(seq(tmin, tmax), cumulative_miscoverage_c, col = 'blue3', lwd = 2)
+lines(seq(tmin, tmax), cumulative_miscoverage_h, col = 'lightgreen', lwd = 2)
+lines(seq(tmin, tmax), cumulative_miscoverage_as, col = 'lightslateblue', lwd = 2)
+abline(h=alpha, lty = 2, lwd = 2)
+grid()
+legend('topleft', legend = c('CLT CI', 'AlwVal CS', 'Hoeff CI', 'Asymp CS', 'Cheby CI'), col = c('magenta4', 'orange', 'lightgreen', 'lightslateblue', 'blue3'), lty = 1)
+
+par(mfrow=c(1, 1))
+```
+
+```{r avg miscov bern, fig.align='center', echo=FALSE, fig.width=12, fig.height=6}
+n <- 10000
+alpha <- 0.1
+mu <- 0.5
+
+
+data_generator_fn <- function() {
+  return(rbinom(n, 1, 0.5))
+}
+
+# Compute asymptotic conf seq
+acs_fn <- function(y) {
+  asymptotic_confseq(x = y, alpha = alpha)
+}
+
+# Compute normal ci
+clt_fn <- function(y) {
+    clt_confidence_intervals(x = y, alpha = alpha)
+  }
+
+#' Compute hoeff ci
+cheb_fn <- function(y){
+  cheb_confidence_intervals(x = y, alpha = alpha)
+}
+
+hoeff_fn <- function(y){
+  hoeff_confidence_intervals(x = y, alpha = alpha, rang = (ub - lb))
+}
+
+avcs_fn <- function(y) {
+  always_valid_confseq(x = y, alpha = alpha)
+}
+
+acs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+avcs_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+clt_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+cheb_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+hoeff_miscoverage <-
+  get_cumul_miscoverage_rate(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M,
+    mu = mu)
+
+acs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = acs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+avcs_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = avcs_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+clt_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = clt_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+cheb_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = cheb_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+hoeff_width <-
+  get_avg_width(
+    data_generator_fn = data_generator_fn,
+    conf_set_fn = hoeff_fn,
+    times = tmin:n,
+    num_repeats = M)
+
+par(mfrow=c(1, 2))
+
+#Plot MIscoverage rates
+plot(seq(tmin, n), clt_miscoverage, type = 'l', ylim = c(0, 1),
+     col = "indianred", xlab = "Time", ylab = "Cumulative Miscoverage Rate", main = "Cumulative Miscoverage Rates", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_miscoverage, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), avcs_miscoverage, lty = 1, col = "orange", lwd = 2)
+lines(seq(tmin, n), hoeff_miscoverage, lty = 2, col ='lightgreen', lwd = 2)
+lines(seq(tmin, n), cheb_miscoverage, lty = 2, col ='blue3', lwd = 2)
+abline(h=alpha, lty = 3, lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", "Cheby CI", "AlwVal CS", paste("Alpha =", alpha)),
+       col = c("indianred", "lightslateblue", "lightgreen", "blue3", "orange", "black"), lty = c(2, 1, 2, 2, 1, 3), cex = 0.8)
+
+# Plot Running Interval Lenght
+plot(seq(tmin, n), clt_width, type = 'l', ylim = c(0, 0.5),
+     col = "indianred", xlab = "Time", ylab = "Length", main = "Running Interval Lenghts", lty=2, lwd = 2)
+lines(seq(tmin, n), acs_width, lty = 1, col = "lightslateblue", lwd = 2)
+lines(seq(tmin, n), hoeff_width, lty = 2, col ='lightgreen', lwd = 2)
+lines(seq(tmin, n), cheb_width, lty = 2, col ='blue3', lwd = 2)
+lines(seq(tmin, n), avcs_width, lty = 1, col = "orange", lwd = 2)
+grid()
+legend("topright", legend = c("CLT CI", "Asymp CS", "Hoeff CI", "Cheby CI", "AlwVal CS"), 
+       col = c("indianred", "lightslateblue", "lightgreen", "blue3", "orange"), lty = c(2, 1, 2, 2, 1), cex = 0.8)
+
+par(mfrow=c(1, 1))
+
+```
+
+From these plots, it is evident that the Cumulative Miscoverages Rate (CMR) of the CLT CI deviates rapidly from the intended level in this setting.
+Even more cautious intervals like the Hoeffding Confidence Interval appear to surpass the designated threshold.
+Consequently, it becomes evident that Confidence Sequences are a more suitable approach, even within this sequential context.
+
+#### Credits and resources
+
+Some functions regarding the CMR were implemented taking inspiration from the R package: <https://github.com/WannabeSmith/drconfseq>
+
+## Part 2
+
+### Data Collection
+
+To design a self-experiment on the relationship between environmental sound levels and mood over an extended period involves we plan the collection of data, tools, interventions, and check for monitoring parameters.
+Here's a description of how to organize:
+
+**Information**
+
+-   General information about measurement (time, day)
+-   Physical-mental features like sleep-related metrics, including heart rate
+-   The app should have the capability to log subjective mood assessments. Participants could use a 5-point **Likert scale** **to rate their mood** periodically, ranging from very Negative to very positive, with options for negative, neutral, positive in between.
+    -   We can introduce or consider also some emoji-response to capture some specif feelings we may consider of interest from literature or some additional text.
+
+**Tools**
+
+1.  **Audios:** Use a mobile app or wearable device to allow participants to **hear different sounds with specific frequencies**.
+    We have to investigate how mood vary with different sound levels: indeed we want to consider different sound levels, covering different ranges.
+    We consider the use of the a smartphone/pc/tablet/... to listen carefully to the sound possibly avoiding ambient noise
+
+2.  **Decibel Meter:** use an app (Audacity) or a dedicated decibel meter to measure environmental sound levels.
+    Ensure the tool provides accurate and consistent readings
+
+3.  **Mood Tracker:** a mood tracking questionnaire that allows participants to log their mood at regular intervals easily (including elements cited previously).
+
+**Choice of the audios**
+
+-   *To evaluate a wide* **range of sound levels** *on a broad scale, we will include various frequencies, taking into consideration both average and maximum levels*.
+    Sound should be tentatively sorted according to the following two measures of noise levels: average and maximum noise levels - according to the World Health Organisation's guidance.
+    To check them we can use some free software s.a.
+    Audacity, import the songs an then have the information of interest.
+
+-   **Environmental sounds**: we want to vary based on the frequencies, but also about some context-associated audios such as relaxing, louder, with high and low tempo.
+    We will be exposed to randomized volume levels of natural sounds, natural sounds with aircraft noise, natural sounds with ground traffic, or natural sounds with human voices added.
+
+### Design
+
+-   We should have two datasets: one control and one to which we performs the interventions described above. To do so, there should be a first time of the experiment to which we monitor our daily mood and sound exposure and then a second time of the experiment where we interfere. Both times should be of the same length.
+-   Exposure 4 times a day for at least 20 seconds
+-   We consider two types of sound: natural and urban each with different sound level and assign them randomly
+-   Within the 4 times, 1 should be in the morning, 2 in the afternoon and one at noon
+-   The participants will be the three researchers
+-   Tentativily conduct the experiment for 3 weeks
+-   At the end of the experiment, we should compare the data collected into the two time-points (control vs interference) and observe the variations on the mood, if any.
+
+After one week we should have a data set with 4 mood surveys per days for each participant = $7\cdot4\cdot3 = 84$ mood surveys.
+For each survey, we have information about sex, hour of surveys, heart rate, hours of sleep and some additional information for some potential extra analysis.
+
+**Temporal Confoundings**:
+
+-   We have to keep track on how mood scored varies over consecutive measures, trying to identify paths and trends and assessing the impact of sound exposure.
+-   We have to keep in mind that mood may change by specific days of week (weekdays VS weekend). Participants may experience different stress level due to personal events (work, family, university)
+-   We should keep in mind the potential effect that a season has on a person and hours of sun exposure.
+
+**Others confoundings:**
+
+Variable that can affect mood are various and heterogeneous.
+We're tracing some of them but more can influence our experiment.
+
+All these issues can be overcome by the reference dataset (no intereference) and by allowing the people the give a score on their mood level and add extra comments that can contextualise their mark.
+
+**Randomization** Randomly assign exposure conditions to minimize biases and increase the validity of findings.
+
+**Sampling** **Policy:** The experiment will be conducted among group members.
+In this case, seeking consent or explaining the terms of the experiment will not be necessary, as they are already familiar with them.
+
+**IID sampling:** We need to ask ourselves whether this results are independent or there are perhaps some factors may have impact on the result of the research.
+For instance being friends possibly implies the simulation to be not entirely independent.
+Other confounding factors might also come into play.
+In general, the assumption of independence tends to work better with larger samples.
+We could assume independence or justify its probability.
+However, if the model exhibits high residuals, this hypothesis may not hold true.
+
+### Population Parameter to Monitor
+
+**Visualization and summaries** Track the evolution of mood scores throughout the entire experimental duration by employing temporal series for informative visual representations.
+
+1.  **Simple average Wald test**
+
+The Wald test is a statistical test commonly used in hypothesis testing.
+In our context, it helps determine whether the estimated difference in mood scores between exposure to low sounds and high sounds (considering only these two subpopulations: we're splitting the results into two) is statistically significant.
+At first we compare only low sound levels associated moods and high sound level associated moods without further information; looking at simple averages of the moods.
+
+Assuming independence, homoscedasticity in populations, and a sufficiently large sample size, let's consider our mean as a plug-in estimator.
+According to the Central Limit Theorem, this estimator is asymptotically normally distributed, allowing us to employ the Wald statistic.
+To elaborate further, the CLT assures us that as the sample size increases, the distribution of our estimator converges to a normal distribution.
+Suppose that this hold for both $high$ and $low$ population samples.
+Consequently, we can utilize the Wald statistic for hypothesis testing.
+
+If $X_{low} \sim N(\mu_{low}, s_{low}^2)$ and $X_{high} \sim N(\mu_{high}, \sigma_{high}^2)$, based on established results for normal random variables, it follows that: $$
+ \left(X_{low} - X_{high}\right) \sim N\left(\mu_{low} - \mu_{high}, \frac{s_{low}^2}{n_{low}} + \frac{s_{high}^2}{n_{high}}\right)
+ $$
+
+$\mu = \mu_{low}-\mu_{high}$
+
+$$
+\begin{equation}
+\begin{cases}
+H_0: & \mu \geqslant \delta_0\\
+H_1: & \mu < \delta_0
+\end{cases}
+\end{equation}
+$$
+
+Under $H_0, \qquad W \sim t_{n_{low}+n_{high}-2}$ and $\delta_0$ is the mean under zero-hypothesis
+
+Under $H_0$, we expect a positive impact for mood with *low sound* levels.
+In the alternative hypothesis we are testing whether the mean of the *low sound* group is significantly lower than the mean of the *high sound* group, suggesting a potential negative impact of *low sound* on mood compared to *high sound*.
+
+**Wald Test Statistic:** $$ W = \frac{(\hat{\mu}_{low} - \hat{\mu}_{high})- \mu}{S_p^2 \sqrt{\frac{1}{n_{low}} + \frac{1}{n_{high}}}} $$
+
+Where: $\hat{\mu}_{low}$ is the estimated mean mood score for low sound levels.
+$\hat{\mu}_{high}$ is the estimated mean mood score for high sound levels.
+- $n_{low}$ is the sample size for low sound levels.
+- $n_{high}$ is the sample size for high sound levels.
+- $s_{low}^2$ is the sample variance for low sound levels.
+- $s_{high}^2$ is the sample variance for high sound levels.
+
+and $$S_p^2= \dfrac{(n_{low}-1)s_{low}^2+(n_{high}-1)s_{high}^2}{n_{low}+n_{high}-2}$$
+
+Probably we should tune alpha and we expect to get lower precision so we may want to be not that strict to alpha.
+It is also comment to consider a lower guarantee for social experiments.
+
+2.  **Regression coefficient Wald test**
+
+But, as we are aware of the multiples confounding, we may want to compute this average from a regression model to check for some other variables excluding their influences.
+We may want to check now if, knowing the information of the extra variables, the difference is still different.
+This may imply to properly select our variables and check for correlation between them, which may be an issue here.
+We may want to have something like this as first step to start with:
+
+$$
+\begin{align}
+y_i = X_i'\alpha = &  \alpha_0 + \alpha_1\texttt{rescale(sound levels)} + \alpha_2\texttt{rescale(hours slept)} +\\
+&+ \alpha_3\texttt{rescale(week effect)} + \alpha_4\texttt{rescale(leisure/relax hours)}+ \\
+&+  + \alpha_5 \texttt{(gender)} + \alpha_6\texttt{rescale(heart beat)} + \dots
+\end{align}
+$$
+
+$\text{week effect}$: It is assumed that the effects of days from Monday to Friday are equal to each other, and similarly for the effects of Saturdays and Sundays.
+In this case, a single variable is sufficient: $wd_t = gs_t - \frac{gw_t}{2}$
+
+where $(gs_t)$ is the number of working days (from Monday to Friday) in period $t$ and $(gw_t)$ is the number of Saturdays and Sundays in period $t$.
+
+$(wd_t)$ is constructed in a way that the effect cancels within the week (indeed, $( 5 - \frac{5}{2} \cdot 2 = 0 ))$.
+
+OBS: Maybe also $\alpha_i\texttt{dayoftheweek}:\texttt{hoursslept}$ may be added.
+Could be reasonable to think that, even when going out on weekends and sleep less, my mood improved with respect to the weekend, although I may sleep more.
+
+$\text{leisure/relax hours}$: We could consider a variable where we track the hours spent in a day in parks, natural areas or place that the partecipants considers as relaxing.
+
+$\text{sound levels}$: average sound levels (frequency)
+
+And base our decision on the following hypothesis:
+
+$$
+\begin{equation}
+\begin{cases}
+H_0: & \alpha_1 <0\\
+H_1: & \alpha_1 \geqslant 0
+\end{cases}
+\end{equation}
+$$
+
+**Decision Rule:** If the absolute value of the calculated Wald test statistic is greater than the critical value (determined based on the chosen level of significance), we reject the null hypothesis in favor of the alternative hypothesis.
+This suggests that higher sound levels do not have a significant impact on the score within this dataset.
+However, it's important to note that the extension of this result to a generic population may be limited due to small sample sizes or correlations.
+
+### Intervention and Potential Issues
+
+-   Do not control for significant variables
+-   Short time window of observation, few observations
+-   Detect long time changes.
+
+**Controlled Exposure Variations:**
+
+-   Considering to reduce or improve the number of time-window were the partecipants are exposed to the audio.
+-   Ensure randomization search that that the order and combination of sound exposures are varied for each participants. This is necessary in controlling potential order effects and strengthen results (strongest generalization).
+-   Investigate the role of context-specific sounds such that we investigate the impact of high frequencies in natural context and low frequencies in urban contexts.
+
+### Leveraging Confidence Sequences in Experiment Contexts
+
+-   **Updating the analysis**: with confidence sequences, we can continuously monitor the evolving data and update our hypotheses sequentially.
+    They enable the establishment of optimal stopping rules, allowing researchers to halt data collection when a desired confidence level in conclusions is attained.
+    If a significant improvement in mood is observed with a particular sound type or level, the adaptive nature of confidence sequences allows us to respond promptly.
+    This might involve introducing new interventions, or focusing on specific aspects of the study.If, however, our confidence interval consistently includes zero (indicating no significant difference), we might decide to conclude the experiment, recognizing that additional data collection is unlikely to alter the conclusion.
+    In such cases, we may also contemplate modifying the experiment design or exploring additional factors that could influence the observed outcomes.
+
+-   **Robustness**: rather than relying on traditional hypothesis testing at fixed intervals, confidence sequences enable sequential hypothesis testing.
+
+### Algorithm
+
+This experiment involves several aspects: data collection, intervention, correlation analysis, and potential advanced modeling.
+Therefore, we may require to use several algorithm in the analysis of data:
+
+-   Instrumental Variable Analysis Algorithm to assess causal relationships and estimate treatment effects;
+
+-   Seasonal-Trend decomposition using LOESS (STL) Algorithm for analyzing temporal trends and seasonality in mood scores;
+
+-   Generalized Linear Models;
+
+-   Spatial autocorrelation analysis: analyzing the impact of location on mood scores.
+
+### Expectations
+
+-   Have sufficient precision with apps with low-cost external microphones as they, by literature, produced reliable results of averaged noise levels in both the laboratory and field research
+-   Certain common trends were observed: The negative mood scores were reduced when the traffic and fountain sounds were combined with the contexts, while the combination of the considered contexts with street music did not affect the mood states
+-   As by literature [3] we expect negative mood scores were reduced when the traffic and fountain sounds were combined with the contexts, while the combination of the considered contexts with street music did not affect the mood states. Furthermore we assume that, introducing human activities can significantly improve the mood states (specifically, reducing anger and depression) of users of a space.
+
+To sum up: by organizing data collection, implementing interventions, and monitoring relevant parameters, the self-experiment aims to provide insights into the relationship between environmental sound levels and mood over an extended period.
+Controlled studies and statistical analyses will contribute to drawing meaningful conclusions from the gathered data.
+
+### Literature
+
+The relationship between environmental sound and mood has been a subject of research.
+[1] Studies have shown that environmental sounds can affect human emotions.
+The effects of different sound types in various environmental contexts on mood states have been investigated, with findings suggesting that the impact of environmental sounds on mood outcomes varies across sound types and environmental contexts[2][3].
+Additionally, research has demonstrated that changes in acoustic attributes in environmental sounds can trigger emotions, similar to those evoked by speech and music[5].
+Furthermore, anthropogenic noise sources, such as aircraft noise and human voices, have been found to influence individual mood and relaxation in simulated park environments[4][7].
+These findings highlight the significant relationship between environmental sound and human emotions.
+
+Noise levels were measured in terms of average and maximum noise levels according to the World Health Organisation's guidance.
+[8] Noise levels are monitored though phones as they have been already used in research studies to measure environmental sound levels.
+Researches has shown that smartphones can be used as useful noise measurement devices, with studies evaluating the accuracy and precision of sound level meter applications for measuring environmental noise[9][10].
+The feasibility of this experiment has been investigated also in related works.
+[11]
+
+To conclude, also the relation(s) between sunlight exposure and menthal-health, seasons, weekdays and so on, are factors that should be taken into consideration, as stated above.
+[6]
+
+**Bibliography**:
+
+[1] <https://pubmed.ncbi.nlm.nih.gov/23412579/>
+
+[2] <https://www.sciencedirect.com/science/article/pii/S0360132321008520>
+
+[3] <https://etheses.whiterose.ac.uk/31125/1/manuscript%20Final.pdf>
+
+[4] <https://www.frontiersin.org/articles/10.3389/fpsyg.2020.570694>
+
+[5] <https://www.pnas.org/doi/full/10.1073/pnas.1515087112>
+
+[6] <https://www.sciencedirect.com/science/article/pii/S0896627323007109>
+
+[7] <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7591392/>
+
+[8] <https://cdn.who.int/media/docs/default-source/who-compendium-on-health-and-environment/who_compendium_noise_01042022.pdf?sfvrsn=bc371498_3>
+
+[9] <https://www.ncbi.nlm.nih.gov/pmc/articles/PMC8749792/>
+
+[10] <https://www.researchgate.net/publication/289502743_Testing_the_accuracy_of_smartphones_and_sound_level_meter_applications_for_measuring_environmental_noise>
+
+[11] <https://www.sciencedirect.com/science/article/pii/S0883944123001843?dgcid=rss_sd_all>
