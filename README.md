@@ -1,2 +1,2 @@
 # SDS
-SDS Homeworks
+Statistical Methods for Data Science Homeworks
