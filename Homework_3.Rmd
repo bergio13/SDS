@@ -1,0 +1,673 @@
+---
+title: "Homework 3"
+author: "Bertone, Rinaldi, Zanoni"
+date: "2024-01-24"
+output: 
+  prettydoc::html_pretty:
+    theme: hpstr
+    toc: yes
+    highlight: github
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyquant)
+library(dplyr)
+library(igraph)
+require(tseries, quietly = TRUE) # Load the package 
+options("getSymbols.warning4.0" = FALSE)
+library(knitr)
+library(kableExtra)
+```
+
+```{=html}
+<style>
+  body {
+    text-align: justify}
+</style>
+  ```
+# Exercise 1
+
+There are 3 students: A, B and C that have to complete an homework. Exactly one of them needs to be working on the HW to complete it.
+
+They have different working hours and by forming a coalition $K$, that is an agreement on the times they will really be working they can save up some time. The coalition value $\nu(K)$ is the number of hours saved by a well organized coalition.
+
+These are their available working times:
+  
+  -   C from 9.00 to 13.00
+
+-   B from 11.00 to 16.00
+
+-   A from 14.00 to 17.00
+
+We know $\nu(A)=\nu(B)=\nu(C) = 0$ and $\nu(ABC) = 4$. Moreover we can also see that $\nu(CB) = 2$, $\nu(CA) = 0$, $\nu(BA) = 2$.
+
+Now to compute the Shapley value for each player we need to compute their **average marginal contribution**, where the average is taken over all possible permutations of the players. The formula is $$
+  \phi(j) = E_{\pi}(\Delta_{pi}(j)) = \frac{1}{p!} \cdot \sum_{\pi \in \Pi} \Delta_{\pi}(j)
+$$
+  
+  We can easily compute the Shapley value by constructing a table as the one in *Example 2*.
+  
+  | Permutation | Player A | Player B | Player C |
+  |-------------|----------|----------|----------|
+  | ABC         | 0        | 2        | 2        |
+  | ACB         | 0        | 4        | 0        |
+  | BAC         | 2        | 0        | 2        |
+  | BCA         | 2        | 0        | 2        |
+  | CAB         | 0        | 4        | 0        |
+  | CBA         | 2        | 2        | 0        |
+  | Total Value | 6        | 12       | 6        |
+  
+  Since we assume all $3! = 6$ permutations are all equally likely, the average value, that is the average contribution to the number of hours saved, of each team member is:
+  
+  $$
+  \phi_A = \frac{6}{6} = 1, \; \; \; \phi_B = \frac{12}{6} = 2, \; \; \; \phi_C = \frac{6}{6} = 1
+$$
+  
+  Thus, student $A$ and $C$ contribute to saving $1$ hour each and student $B$ to saving $2$ hours.
+
+------------------------------------------------------------------------
+  
+# Exercise 2
+  
+We have a portfolio of $p$ stocks whose returns are modeled by a set of random variables $\{X_1, …, X_p\}$ and we want to allocate to each asset of this portfolio its *contribution* to the **total utility** defined as $U_{\omega}(\sum_{j=1}^p X_j)$ , where the utility function $U_{\omega}$ is a linear combination of the portfolio average return and volatility. In particular, for some weight $\omega > 0$ we have:
+  
+  $$
+  U_{\omega}(X) = E(X) - \omega \cdot Var(X)
+$$
+  
+  To do this we can tackle the problem from a cooperative game theory perspective by defining a variance game over $P = \{1, …, p\}$ and compute the Shapley values. Specifically, the Shapley allocation to each stock $j \in \{1, …, p\}$ is given by
+
+$$
+  \phi(j) = E(X_j) - \omega \cdot Cov(X_j, R_P) = E(X_j) - \omega \cdot \sum_{r=1}^p Cov(X_j, X_r)
+$$
+  
+  Put differently, to learn the Shapley in this game, we need to study the marginal correlation graph among some standard measure of stock *relative performance*. To this very end, we will collect the *daily closing prices* for $p$ stocks, selected within those consistently in the S&P500 index (we want to collect few stocks from different Global Industry Classification Standard (GICS) sectors to boost the overall value/utility of the portfolio through *diversification*).
+
+## Selecting the Stocks
+
+To choose a portfolio of $p$ stocks from the SP500, taking into consideration the sectors, we looked at the composition of the index at this [link](https://en.wikipedia.org/wiki/List_of_S%26P_500_companies). For each sector we chose the two biggest companies in terms of market capitalization. Then we computed a **relative price** in order to represent the factor by which the wealth invested in the $j_{th}$ stock increases during the $t_{th}$ period. In particular, we used *"Borodin et al.(2004)"* measure:
+  
+  $$
+  x_{t,j} = log(\frac{c_{t, j}}{c_{t - 1, j}})
+$$
+  
+  where $c_{t, j}$ is the closing price of stock $j$ at time $t$. The period we considered is the "*Covid-Age*", i.e. from 01/01/2020 to 31/12/2023.
+
+```{r download stocks, message=FALSE, warning=FALSE}
+# Get the S&P 500 index updated
+sp500_index <- tq_index("SP500")
+# Get the sectors
+sp500 <- read.csv(
+  "https://datahub.io/core/s-and-p-500-companies/r/constituents.csv")
+
+colnames(sp500)[colnames(sp500) == "Symbol"] <- "symbol"
+
+# Merge data frames based on the 'symbol' column
+merged_df <- merge(sp500_index, sp500, by = "symbol", how = "left")
+
+# Number of stocks for each sector
+for_sec <- 2
+
+# Get the top n companies by weight in the index for each sector
+top5_by_weight <- merged_df %>%
+  arrange(desc(weight)) %>%
+  group_by(Sector) %>%
+  slice_head(n = for_sec) %>%
+  ungroup()
+
+
+# Select the columns you want to display
+selected_columns <- top5_by_weight[,c(1, 2, 10)]
+
+# Create a nice table
+kable(selected_columns, format = "html", 
+      caption = "Selected companies for each sector")
+
+#Get symbols
+symbs <- top5_by_weight$symbol
+
+# Build matrix with stocks and log of relative price 
+stocks <- matrix(data=NA, nrow=1006, ncol = dim(top5_by_weight)[1])
+
+colnames(stocks) <- symbs
+i <- 1
+for (symbol in symbs){
+  temp <- get.hist.quote(instrument=symbol, 
+                         start="2020-01-01", end="2023-12-31",
+                         quote= c("Close"), provider="yahoo", 
+                         drop=TRUE, quiet = TRUE)
+  y <- temp /c(NA, head(temp, -1))
+  y <- log(y)
+  stocks[, i] <- y
+  i = i + 1
+}
+
+head(stocks[,c(1:5)])
+
+```
+
+```{r returns plot, echo=FALSE}
+n_stocks <- 5
+# Plot each stock's returns
+matplot(1:nrow(stocks), stocks, type = "l", xlab = "Time", ylab = "Returns", main="First 5 Stock Returns", col = topo.colors(n_stocks))
+
+# Add a legend
+legend("topright", legend = colnames(stocks[,c(1:n_stocks)]), col = topo.colors(n_stocks), lty = 1)
+
+```
+
+## Building the Graph
+
+We now want to construct a *correlation graph* based on Pearson correlation coefficients between stocks, taking into account the statistical significance through the confidence intervals. Let's break down all the required steps.
+
+1.  **Compute Pearson Correlation Coefficients**: compute the correlation between each pair of stocks treating the instances $\{x_{t, j}\}_t$ as **independent** (even if they are not).
+
+```{r correlation}
+#Compute correlation matrix
+cor_matrix <- cor(stocks[-1,])
+
+head(cor_matrix[,c(1:5)])
+```
+
+2.  **Calculate Confidence Intervals**: for each correlation coefficient, calculate the asymptotic Normal-based confidence interval (using Fisher's $z'$ transform).
+
+```{r conf int}
+#Set alpha
+alpha <- 0.05
+n <- nrow(stocks)
+
+# Function to compute CI for correlation
+compute_ci <- function(r, alpha, n){
+  #Convert r to z_prime
+  z_prime <- 0.5*( log((1+r)/(1-r)) )
+  
+  z <- qnorm(1 - alpha/2)
+  se <- 1/sqrt(n-3)
+  ci <- z_prime + c(-1, 1)*z*se
+  
+  # Convert back to r
+  ci <- tanh(ci)
+  
+  return(ci)
+}
+
+
+```
+
+3.  **Choose a Threshold ($\tau$)**: we want to choose a threshold $\tau > 0$. To do this we examine the distribution of the correlation between the stocks.
+
+```{r corr distro, echo=FALSE}
+# Extract lower triangle of correlation matrix
+lower_triangle <- cor_matrix[lower.tri(cor_matrix)]
+
+# Plot histogram of correlations
+hist(lower_triangle, breaks = 20, col = "cyan4", probability= TRUE, 
+     main = "Distribution of Stock Correlations", xlab = "Correlation", 
+     ylab = "Frequency")
+
+summary(lower_triangle)
+```
+We opt for $\tau = 0.3$ since it represents a relatively low value of correlation ($\rho$), falling around the first quartile. Lower correlation values might primarily reflect the specific time frame chosen for the analysis rather than indicating a significant "relationship" between the two stocks.
+
+```{r threshold}
+#Define tau interval
+tau <- c(-1, 1) * 0.3
+```
+
+4.  **Check the Intersection**: for any chosen threshold $\tau$, want to check if $C_n^{j_1,j_2}(\alpha) ∩ [−\tau, +τ] = ∅$, where $C_n^{j_1,j_2}(α)$ denotes the usual asymptotic Normal-based confidence interval for the Pearson-correlation. 
+We are essentially establishing a connection, or edge, between two nodes or stocks based on the strength of correlation with respect to two tau values. When considering the interval [-$\tau$, +$\tau$], we are identifying correlations that exhibit sufficient strength either in the positive or negative sense. A higher value for tau implies a strong correlation, so it is crucial to carefully set this parameter for meaningful analysis. These consideration consider a fixed $\alpha$.
+
+```{r check intersection}
+# Define a function to check intersection
+check_interval_intersection <- function(interval1, interval2) {
+  if (max(interval1[1], interval2[1]) <= min(interval1[2], interval2[2])) {
+    return(FALSE)  # Intervals intersect
+  } else {
+    return(TRUE)  # Intervals do not intersect
+  }
+}
+
+# Initialize a vector to store  bool values
+vals <- vector("numeric", length = choose(ncol(stocks) - 1, 2))
+index <- 1
+
+for (i in 1:nrow(cor_matrix)) {
+  for (j in 1:ncol(cor_matrix)) {
+    r <- cor_matrix[i, j]
+    ci <- compute_ci(r, alpha, n)
+    
+    # Check if the confidence interval and threshold interval do not intersect
+    if (check_interval_intersection(ci, tau)) {
+      # Store the bool value
+      vals[index] <- TRUE
+      index <- index + 1
+    }
+  }
+}
+
+cat("Statistically significant Pearson correlations between stocks:",
+    (sum(vals) - nrow(cor_matrix))/2)
+```
+
+5.  **Adjust for Multiplicity**: Since we are computing many Confidence Intervals on the same data, we need to adjust for multiplicity, in order to ensure that the probability of the true parameter value $\theta_j$ belonging to the confidence interval $C_j$ is greater or equal to $1 - \alpha$. To do this we are going to apply the Bonferroni correction, constructing each confidence interval $C_j$ at level $1 - \frac{\alpha}{m}$.
+
+```{r adjust mult}
+
+m <- nrow(cor_matrix)
+# Initialize a vector to store bool values
+vals <- vector("numeric", length = choose(ncol(stocks) - 1, 2))
+index <- 1
+
+for (i in 1:nrow(cor_matrix)) {
+  for (j in 1:ncol(cor_matrix)) {
+    r <- cor_matrix[i, j]
+    ci <- compute_ci(r, alpha/m, n)
+    
+    # Check if the confidence interval and threshold interval do not intersect
+    if (check_interval_intersection(ci, tau)) {
+      # Store the bool value
+      vals[index] <- TRUE
+      index <- index + 1
+    }
+  }
+}
+
+cat("Statistically significant Pearson correlations between stocks:", 
+    (sum(vals) - m)/2)
+
+```
+
+We notice that the number of significant correlations has decreased now that we accounted for multiplicity.
+
+6.  **Construct the Graph**: we create and adjacency matrix and place an edge between $j_1$ and $j_2$ if $C_n^{j_1,j_2}(\alpha) ∩ [−\tau, +τ] = ∅$ (the confidence intervals are corrected as showed before).
+
+```{r construct graph}
+
+# Create an empty adjacency matrix for the graph
+graph_adjacency_mat <- matrix(0, ncol = ncol(stocks), nrow = ncol(stocks))
+
+index <- 1
+for (i in 1:(ncol(stocks) - 1)) {
+  for (j in (i + 1):ncol(stocks)) {
+    r <- cor_matrix[i, j]
+    ci <- compute_ci(r, alpha/m, n)
+    
+    # Check if the confidence interval does not intersect tau
+    if (check_interval_intersection(ci, tau)) {
+        graph_adjacency_mat[i, j] <- 1
+        graph_adjacency_mat[j, i] <- 1
+    }
+  }
+}
+
+# Build the graph from the adj matrix
+graph <- graph.adjacency(graph_adjacency_mat, mode = "undirected", 
+                         weighted = TRUE)
+
+```
+
+## Visualizing the Graph
+
+We want to visualize the graph we just built. Moreover, to have a better understanding of the graph we also want to color the edges differently based on the strength of the correlation between the stocks. Indeed, we are going to color as *"grey"* the edges between stocks with low/moderate correlation ($\rho \le 0.5$), as *"light blue"* the edges between stocks with moderately strong correlation ($0.5 < \rho < 0.8$) and as *"dark blue"* the links between stocks strongly correlated ($\rho \ge 0.8$).
+
+```{r graph, fig.width= 12, fig.height=10}
+
+# Set the weights of the edges as the correlation between stocks
+E(graph)$weight <- cor_matrix[get.edgelist(graph)]
+
+# Choose two thresholds
+positive_threshold <- 0.8
+negative_threshold <- 0.5
+
+```
+```{r visualize, fig.width= 12, fig.height=10, echo=FALSE}
+
+# Set node and edge colors
+node_colors <- colorRampPalette(c("slateblue"))(length(V(graph)))
+
+# Define edge colors based on thresholds
+edge_colors <- ifelse(abs(E(graph)$weight) >= positive_threshold, "purple4",
+                      ifelse(abs(E(graph)$weight) <= negative_threshold, 
+                             "ivory3", "lightblue3"))
+
+
+# Set node and edge sizes
+node_size <- 12
+edge_width <- E(graph)$weight * 3
+edge_alpha <- E(graph)$weight * 1.1
+
+# Set graph layout
+graph_layout <- layout.auto(graph)
+
+# Plot the graph
+plot(graph, 
+     layout = graph_layout,
+     main = "Correlation Graph", 
+     vertex.label = colnames(stocks),
+     vertex.color = node_colors,
+     vertex.frame.color = "black",  # Border color of nodes
+     vertex.label.color = "black", # Label color
+     vertex.label.cex = 0.9,
+     edge.color = edge_colors,
+     edge.width = edge_width,
+     edge.alpha = edge_alpha,
+     vertex.size = node_size,
+     edge.curved = 0.3,
+     edge.lty = 1  # Line type of edges 
+)
+
+
+
+```
+We notice that stocks in the same sector tend to have higher correlations. Indeed, the only six stocks with $\rho \ge 0.8$ belong in pairs to the same sectors.
+
+Let's now do a quick analysis of the graph to build a better intuition and to check if everything seems correct.
+
+```{r graph analysis}
+# Compute number of vertices and edges
+num_edges <- ecount(graph)
+num_vertices <- vcount(graph)
+
+# Compute density
+total_possible_edges <- (num_vertices * (num_vertices - 1)) / 2
+density <- num_edges / total_possible_edges
+
+# Average degree
+avg_degree <- mean(degree(graph))
+
+# Average shortest path length
+avg_shortest_path <- mean(igraph::distances(graph, mode = "out"))
+
+cat("Vertices:", num_vertices, "\n",
+    "Edges:", num_edges, "\n",
+    "Density:", density, "\n",
+    "Average degree:", avg_degree, "\n",
+    "Average shortest path length:", avg_shortest_path, "\n"
+)
+
+```
+The number of vertices and edges is correct and in line with the data and the calculations above. The graph is dense and each node is, on average, well connected with the other nodes. This is partly because we chose a value for $\tau$ not too big, thus we only exclude the stocks that are very weakly correlated ($\rho < 0.3$). Moreover, these stocks all belong to the same index, so it is expected that they move in the same direction or more generally that they influence the price of each other, in particular during a period of overall market decline and subsequent growth as the *Covid age*.
+
+Next, we try to decrease $\alpha$. Since the confidence intervals get bigger, we expect a lower number of null intersections between the CI and the interval $[-\tau, \tau]$.
+
+```{r smaller alpha}
+alpha <- 0.01
+# Initialize a vector to store bool values
+vals <- vector("numeric", length = choose(ncol(stocks) - 1, 2))
+index <- 1
+
+for (i in 1:nrow(cor_matrix)) {
+  for (j in 1:ncol(cor_matrix)) {
+    r <- cor_matrix[i, j]
+    ci <- compute_ci(r, alpha/m, n)
+    
+    # Check if the confidence interval and threshold interval do not intersect
+    if (check_interval_intersection(ci, tau)) {
+      # Store the bool value
+      vals[index] <- TRUE
+      index <- index + 1
+    }
+  }
+}
+
+cat("Statistically significant Pearson correlations between stocks:", 
+    (sum(vals) - m)/2)
+
+```
+As we would expect, we notice that the number of statistically significant correlations has decreased.
+
+On the other hand, if we increase $\alpha$, we expect this number to go up since the confidence intervals will be smaller.
+
+```{r bigger alpha}
+alpha <- 0.1
+# Initialize a vector to store bool values
+vals <- vector("numeric", length = choose(ncol(stocks) - 1, 2))
+index <- 1
+
+for (i in 1:nrow(cor_matrix)) {
+  for (j in 1:ncol(cor_matrix)) {
+    r <- cor_matrix[i, j]
+    ci <- compute_ci(r, alpha/m, n)
+    
+    # Check if the confidence interval and threshold interval do not intersect
+    if (check_interval_intersection(ci, tau)) {
+      # Store the p-value
+      vals[index] <- TRUE
+      index <- index + 1
+    }
+  }
+}
+
+cat("Statistically significant Pearson correlations between stocks:", 
+    (sum(vals) - m)/2)
+
+```
+Indeed, this is what happens.
+
+
+## Computing the Shapley Values
+
+Now, based on our data matrix $X$ we can finally compute the Shapley values of the $p$ stocks in our portfolio. Given $\omega = 1/p$, we compute these values using the formula:
+  
+$$
+  \phi(j) =  E(X_j) - \omega \cdot \sum_{r=1}^p Cov(X_j, X_r)
+$$
+  
+```{r stocks shapley}
+
+# Define omega value
+omega <- 1/dim(graph_adjacency_mat)[1]
+#Compute expected values
+E_Xj <- colMeans(stocks[-1,])
+#Compute covariances
+Cov_Xj_Rp <- colSums(cov(stocks[-1, ]))
+
+#Compute Shapley values
+shapley <- E_Xj - omega*Cov_Xj_Rp
+
+#print the results
+print(round(shapley*100, 3))
+
+cat("Sum of Shapley values:", sum(round(shapley*100, 3)))
+
+```
+In the context of *Modern Portfolio Theory* (MPT), the goal is to construct a portfolio that maximizes expected return for a given level of risk or, equivalently, minimizes risk for a given level of expected return. Stocks with higher Shapley values are stocks that contribute more to the total utility of the portfolio. On the other hand, as shown in *"Colini-Baldeschi et al. (2018)"*, if a stock contributes to hedge a risk, then it is “rewarded” with a negative Shapley value.
+Moreover, according to *"Shalit (2017)"*, if this portfolio satisfies the optimality conditions, we could use Shapley values to measure the exact contribution of each stock to the risk inherent in the MVP and say that the optimal portoflio variance for a given return equals the sum of the Shapley values. (If these conditions were satisfied for our portfolio, we could say for example GOOGL has a Shapley value of $0.048\%$ and it contributes to total risk exposure by $\frac{0.76}{0.048}=16\%$.)
+
+Now, let's imagine the investor has some personal biases or knowledge that make him more or less risk averse towards specific stocks, or that we want to take a step towards choosing the optimal weights and thus we have a different weight for each stock.
+
+```{r stocks shapley om}
+#Generate random numbers
+rv <- runif(ncol(stocks), 0.5, 1)
+#Compute weights
+om <- rv /sum(rv)
+#Compute expected return
+E_Xj <- colMeans(stocks[-1,])
+#Compute covariances
+Cov_Xj_Rp <- colSums(cov(stocks[-1, ]))
+
+#Compute shapley values
+shap <- E_Xj - om*Cov_Xj_Rp
+
+# Print shapley values
+print(round(shap*100, 3))
+
+
+cat("Sum of Shapley values:", sum(round(shap*100, 3)))
+
+```
+We notice that we get different Shapley values and their sum too leads to a different result.
+
+Now, to check if the first computed values are correct, we are going to use the first property of the Shapley value: 
+$$
+  \sum_j \phi(j) = \nu(P)
+$$ 
+
+In our case $\nu(P) = U_{\omega}(R_p) = E(R_p) - \omega \cdot Var(R_p)$.
+
+```{r check shap}
+sum_shapley <- sum(shapley)
+
+nu_P <- mean(rowSums(stocks[-1,])) - omega * var(rowSums(stocks[-1,]))
+
+#Check inequality
+cat("Is the inequality satisfied ?", all.equal(sum_shapley, nu_P))
+```
+
+
+## Computing the Confidence Intervals for the Shapley values
+
+Now, always based on our data matrix $X$ we compute the confidence intervals for the Shapley values of the $p$ stocks in our portfolio. Given $\omega = 1/p$ and $\alpha = 0.05$ we build our confidence intervals from a non-parametric bootstrap.
+
+In building our bootstrap, we perform it for each column (stock) independently from the other stocks. 
+
+Then, we compute the Shapley value of this new temporary matrix and save. We do it again for the size of the bootstrap with all the newly computer shapley values until we have a new matrix with the length of the bootstrap.
+
+```{r bootstrap}
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Consider the matrix without the first row to avoid NA
+stocks1 <- stocks[-1,]
+# Bootstrap 
+B <- 1000
+
+# Matrix to store bootstrap results
+mat <- matrix(NA, nrow = nrow(stocks1), ncol = ncol(stocks1))
+shapley_boot_matrix <- matrix(NA, nrow= B, ncol = ncol(stocks1))
+
+# Bootstrap by column
+
+for (b in 1:B){
+  
+  for (col in 1:ncol(stocks1)) {
+    # Selecting the random sample of the column
+    x <- sample(1:nrow(stocks1), replace = TRUE)
+    # Building the matrix
+    mat[,col] <- stocks1[x,col]
+  }
+  
+  # Computing shapley values for each bootstrapped sample
+  E_Xj_boot <- colMeans(mat)
+  Cov_Xj_Rp_boot <- colSums(cov(mat))
+  
+  shapley_boot_matrix[b,] <- E_Xj_boot - omega*Cov_Xj_Rp_boot
+  
+}
+
+#adjusting heading
+colnames(mat) <- colnames(stocks1)
+colnames(shapley_boot_matrix) <- colnames(mat)
+
+```
+
+To the newly created matrix, we compute the confidence intervals.   
+
+```{r CI bootstrap shapley}
+shapley_hat <- colMeans(shapley_boot_matrix)
+shapley_se <- apply(shapley_boot_matrix, 2, sd)
+
+alpha <- 0.05
+z <- qnorm(1- (alpha/2))
+
+ci_upper <- (shapley_hat + 1 * z * shapley_se)
+ci_lower <- (shapley_hat + -1 * z * shapley_se)
+ci_matrix <- cbind(ci_lower*1000, ci_upper*1000)
+# Create a nice table
+kable(ci_matrix, format = "markdown", 
+      caption = "Confidence intervals for Shapley Values")
+```
+
+
+
+Finally, we visualize the confidence intervals:
+  
+```{r visualization CI, echo=FALSE}
+
+# Plotting 
+plot(1:22, shapley_hat, ylim = range(c(shapley_hat - shapley_se, shapley_hat + shapley_se), na.rm = TRUE), pch = 16, col = 'black', xlab = 'Stocks', ylab = 'Shapley Value', main = 'Bootstrapped Shapley Values with Confidence Intervals',  xaxt = "n")
+
+# Draw error bars
+arrows(x0 = 1:22, y0 = shapley_hat - shapley_se, x1 = 1:22, y1 = shapley_hat + shapley_se, 
+       angle = 90, code = 3, length = 0.05, col = 'gray')
+
+# Add horizontal line at y for reference (optional)
+points(shapley, col = 'purple3', cex=1.9, lwd=3)
+
+# Add labels
+axis(1, at = 1:22, labels = colnames(shapley_boot_matrix), cex.axis = 0.7, las = 2)
+
+# Add legend
+legend("topright", legend=c("Bootstrapped Shapley", "Shapley Vector"),
+       col=c("black", "purple3"), pch=c(16, NA), lwd=c(NA, 3), cex=0.7, bty="n" )
+
+```
+
+As we can see, the true value is within the confidence interval but for all the stocks is skewed to the bottom. For this reason, we decided to investigate weather this could be a product of our mistake. Nevertheless, by investigating the data, we can see that data of all stocks are skewed to the left (negative values). As the shapley values are make up by the average plus a second component based on the covariance we're investigating this second component as well.
+
+Here, we plotted some distribution and skewness index for some stocks. We investigated all of them (and the code that generated them can be easily modified to investigate also the other stocks) but for a visualization reason we decided to plot just a few.
+
+```{r plots data, echo=FALSE}
+
+par(mfrow = c(2, 3))
+for (i in 1:6) {
+  col_name <- colnames(stocks1)[i]
+  skewness_value <- e1071::skewness(as.data.frame(stocks1)[, col_name])
+  
+  cat("Asymmetry index for", col_name, ":", skewness_value, "\n")
+  
+  hist(as.data.frame(stocks1)[, col_name], main = col_name, xlab = "Values", 
+       col = "magenta3", border = "white")
+}
+```
+
+We proceeded with plotting the covariances' distributions of the firsts stocks.
+
+```{r stocks covariance plot, echo=FALSE}
+
+# Plot covariance
+par(mfrow=c(2,3)) 
+for (e in 1:6) {
+  hist(as.vector(cov(stocks[-1,])[e, ]), main = paste(colnames(stocks1)[e]),
+       xlim=c(min(cov(stocks[-1,])[e, ]),max(cov(stocks[-1,])[e, ])), breaks=10, xlab="covariance",
+       col="magenta1", border="white")
+}
+
+```
+
+
+We may find that our results are approximately consistent, as depicted above. Covariance is positive, contributing to the decrease in Shapley values. Even tough distribution are not simmetric, we may also notice that it seems more likely to have low covariances (even if not particularly small compared to Shapley values themselves) within all stocks.
+
+We could roughly say that indeed the asymmetric distribution of stock values influences performances on confidence intervals. Therefore, we consider the distribution through its quantiles and thus compute the pivotal intervals.
+
+```{r pivotal intervals}
+# New plot 1 
+plot(1:22, shapley_hat, pch = 16, col = 'black', 
+     xlab = 'Stocks', ylab = 'Shapley Value', 
+     main = 'Bootstrapped Shapley Values with Pivotal Confidence Intervals',
+     ylim=c(2*shapley[i] - apply(mat, 2, quantile, probs = 0.975)[i],
+            2*shapley[i] - apply(mat, 2, quantile, probs = 0.025)[i]), 
+     xaxt = "n")
+
+# Draw error bars
+arrows(x0 = 1:22, y0 = 2*shapley[i] - apply(mat, 2, quantile, probs = 0.975)[i], 
+       x1 = 1:22, y1 = 2*shapley[i] - apply(mat, 2, quantile, probs = 0.025)[i], 
+       angle = 90, code = 3, length = 0.05, col = 'gray')
+
+# Add shapley original value for reference
+points(shapley, col = 'purple3', cex=1.9, lwd=3)
+
+# Add labels
+axis(1, at = 1:22, labels = colnames(shapley_boot_matrix), cex.axis = 0.7, 
+     las = 2)
+
+# Add legend
+legend("topright", legend=c("Bootstrapped Shapley", "Shapley Vector"),
+       col=c("black", "purple3"), pch=c(16, NA), lwd=c(NA, 3), cex=0.7, bty="n")
+```
+
+We appear to have better results with pivotal confidence intervals.
+
+
